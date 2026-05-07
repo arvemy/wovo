@@ -32,6 +32,14 @@ impl CodexOAuthCredentials {
     pub fn email(&self) -> Option<String> {
         self.id_token.as_deref().and_then(email_from_id_token)
     }
+
+    pub fn provider_account_id(&self) -> Option<String> {
+        self.account_id.clone().or_else(|| {
+            self.id_token
+                .as_deref()
+                .and_then(provider_account_id_from_id_token)
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +102,9 @@ pub fn load_credentials_from_home(home_path: &Path) -> Result<CodexOAuthCredenti
 
 pub fn save_credentials(credentials: &CodexOAuthCredentials) -> Result<(), AppError> {
     let auth_path = credentials.home_path.join("auth.json");
+    if let Some(parent) = auth_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| AppError::AuthRead(error.to_string()))?;
+    }
     let contents =
         fs::read_to_string(&auth_path).map_err(|error| AppError::AuthRead(error.to_string()))?;
     let mut root: Value =
@@ -154,10 +165,26 @@ fn required_token(value: Option<String>) -> Result<String, AppError> {
 }
 
 fn email_from_id_token(id_token: &str) -> Option<String> {
+    jwt_claims(id_token)?
+        .get("email")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn provider_account_id_from_id_token(id_token: &str) -> Option<String> {
+    let claims = jwt_claims(id_token)?;
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|value| value.get("chatgpt_account_id"))
+        .or_else(|| claims.get("chatgpt_account_id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn jwt_claims(id_token: &str) -> Option<Value> {
     let payload = id_token.split('.').nth(1)?;
     let decoded = BASE64_URL_SAFE_NO_PAD.decode(payload).ok()?;
-    let claims: Value = serde_json::from_slice(&decoded).ok()?;
-    claims.get("email")?.as_str().map(str::to_string)
+    serde_json::from_slice(&decoded).ok()
 }
 
 fn dirs_home() -> PathBuf {

@@ -18,6 +18,9 @@ pub struct AccountSummary {
     pub home_path: String,
     pub source: AccountSourceKind,
     pub authenticated: bool,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub last_authenticated_at: Option<i64>,
 }
 
 impl AccountSummary {
@@ -39,6 +42,37 @@ impl AccountSummary {
             home_path,
             source: AccountSourceKind::Ambient,
             authenticated: true,
+            created_at: None,
+            updated_at: None,
+            last_authenticated_at: None,
+        }
+    }
+
+    pub fn managed(
+        id: String,
+        email: Option<String>,
+        provider_account_id: Option<String>,
+        home_path: String,
+        created_at: i64,
+        updated_at: i64,
+        last_authenticated_at: Option<i64>,
+    ) -> Self {
+        let label = email
+            .clone()
+            .or_else(|| provider_account_id.clone())
+            .unwrap_or_else(|| "Managed Codex account".to_string());
+
+        Self {
+            id,
+            label,
+            email,
+            provider_account_id,
+            home_path,
+            source: AccountSourceKind::Managed,
+            authenticated: true,
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            last_authenticated_at,
         }
     }
 }

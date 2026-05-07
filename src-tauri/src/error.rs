@@ -13,6 +13,24 @@ pub enum AppError {
     MissingTokens,
     #[error("Unknown Codex account: {0}")]
     UnknownAccount(String),
+    #[error("The Codex CLI was not found on PATH.")]
+    CodexBinaryNotFound,
+    #[error("Codex login timed out.")]
+    CodexLoginTimedOut,
+    #[error("Codex login was cancelled.")]
+    CodexLoginCancelled,
+    #[error("Codex login is already running.")]
+    CodexLoginInProgress,
+    #[error("Codex login failed: {0}")]
+    CodexLoginFailed(String),
+    #[error("Codex account storage failed: {0}")]
+    AccountStore(String),
+    #[error("This Codex account has already been added.")]
+    AccountAlreadyExists,
+    #[error("The signed-in Codex account does not match the selected account.")]
+    AccountIdentityMismatch,
+    #[error("Refusing to delete unsafe managed Codex home: {0}")]
+    UnsafeManagedHome(String),
     #[error("Codex token refresh failed: {0}")]
     TokenRefresh(String),
     #[error("Codex usage request failed: {0}")]
@@ -29,6 +47,15 @@ impl AppError {
             Self::AuthDecode(_) => "auth_decode",
             Self::MissingTokens => "missing_tokens",
             Self::UnknownAccount(_) => "unknown_account",
+            Self::CodexBinaryNotFound => "codex_binary_not_found",
+            Self::CodexLoginTimedOut => "codex_login_timed_out",
+            Self::CodexLoginCancelled => "codex_login_cancelled",
+            Self::CodexLoginInProgress => "codex_login_in_progress",
+            Self::CodexLoginFailed(_) => "codex_login_failed",
+            Self::AccountStore(_) => "account_store",
+            Self::AccountAlreadyExists => "account_already_exists",
+            Self::AccountIdentityMismatch => "account_identity_mismatch",
+            Self::UnsafeManagedHome(_) => "unsafe_managed_home",
             Self::TokenRefresh(_) => "token_refresh",
             Self::UsageFetch(_) => "usage_fetch",
             Self::InvalidUsageResponse => "invalid_usage_response",
