@@ -27,6 +27,10 @@ pub enum AppError {
     AccountStore(String),
     #[error("This Codex account has already been added.")]
     AccountAlreadyExists,
+    #[error("Switch to another Codex account before removing the active account.")]
+    ActiveAccountRemovalBlocked,
+    #[error("The live system Codex account cannot be removed while it is still signed in.")]
+    LiveAccountRemovalBlocked,
     #[error("The signed-in Codex account does not match the selected account.")]
     AccountIdentityMismatch,
     #[error("Refusing to delete unsafe managed Codex home: {0}")]
@@ -54,6 +58,8 @@ impl AppError {
             Self::CodexLoginFailed(_) => "codex_login_failed",
             Self::AccountStore(_) => "account_store",
             Self::AccountAlreadyExists => "account_already_exists",
+            Self::ActiveAccountRemovalBlocked => "active_account_removal_blocked",
+            Self::LiveAccountRemovalBlocked => "live_account_removal_blocked",
             Self::AccountIdentityMismatch => "account_identity_mismatch",
             Self::UnsafeManagedHome(_) => "unsafe_managed_home",
             Self::TokenRefresh(_) => "token_refresh",

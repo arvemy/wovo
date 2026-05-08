@@ -18,6 +18,10 @@ struct AccountSummary {
     id: String,
     label: String,
     source: AccountSourceKind,
+    is_active: bool,
+    is_live_system: bool,
+    can_switch: bool,
+    can_remove: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -270,6 +274,20 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let switch_account = move |account_id: String| {
+        spawn_local(async move {
+            set_is_account_action_loading.set(true);
+            set_global_error.set(None);
+
+            match account_action::<AccountSummary>("switch_codex_account", &account_id).await {
+                Ok(_) => load_accounts_and_usage(),
+                Err(error) => set_global_error.set(Some(error.message)),
+            }
+
+            set_is_account_action_loading.set(false);
+        });
+    };
+
     let any_action_in_flight = move || is_account_action_loading.get();
     let any_loading = Memo::new(move |_| !loading_ids.get().is_empty());
     let latest_updated_at =
@@ -386,24 +404,82 @@ pub fn App() -> impl IntoView {
                                     let id_for_loading = account.id.clone();
                                     let id_for_reauth = account.id.clone();
                                     let id_for_remove = account.id.clone();
+                                    let id_for_switch = account.id.clone();
                                     let id_for_reauth_action = account.id.clone();
-                                    let is_managed = account.source == AccountSourceKind::Managed;
-                                    let label = account.label.clone();
+                                    let id_for_label = account.id.clone();
+                                    let id_for_source = account.id.clone();
+                                    let id_for_active = account.id.clone();
+                                    let id_for_live_system = account.id.clone();
+                                    let id_for_can_switch = account.id.clone();
+                                    let id_for_can_remove = account.id.clone();
+                                    let fallback_label = account.label.clone();
+                                    let fallback_source = account.source.clone();
+                                    let fallback_is_active = account.is_active;
+                                    let fallback_is_live_system = account.is_live_system;
+                                    let fallback_can_switch = account.can_switch;
+                                    let fallback_can_remove = account.can_remove;
 
                                     let usage_signal = move || usage_by_id.with(|map| map.get(&id_for_usage).cloned());
                                     let error_signal = move || errors_by_id.with(|map| map.get(&id_for_error).cloned());
                                     let loading_signal = move || loading_ids.with(|set| set.contains(&id_for_loading));
                                     let reauth_signal = move || reauth_ids.with(|set| set.contains(&id_for_reauth));
+                                    let label_signal = move || accounts.with(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| item.id == id_for_label)
+                                            .map(|item| item.label.clone())
+                                            .unwrap_or_else(|| fallback_label.clone())
+                                    });
+                                    let managed_signal = move || accounts.with(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| item.id == id_for_source)
+                                            .map(|item| item.source == AccountSourceKind::Managed)
+                                            .unwrap_or(fallback_source == AccountSourceKind::Managed)
+                                    });
+                                    let active_signal = move || accounts.with(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| item.id == id_for_active)
+                                            .map(|item| item.is_active)
+                                            .unwrap_or(fallback_is_active)
+                                    });
+                                    let live_system_signal = move || accounts.with(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| item.id == id_for_live_system)
+                                            .map(|item| item.is_live_system)
+                                            .unwrap_or(fallback_is_live_system)
+                                    });
+                                    let can_switch_signal = move || accounts.with(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| item.id == id_for_can_switch)
+                                            .map(|item| item.can_switch)
+                                            .unwrap_or(fallback_can_switch)
+                                    });
+                                    let can_remove_signal = move || accounts.with(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| item.id == id_for_can_remove)
+                                            .map(|item| item.can_remove)
+                                            .unwrap_or(fallback_can_remove)
+                                    });
 
                                     view! {
                                         <AccountRow
-                                            label=label
-                                            is_managed=is_managed
+                                            label=label_signal
+                                            is_managed=managed_signal
+                                            is_active=active_signal
+                                            is_live_system=live_system_signal
+                                            can_switch=can_switch_signal
+                                            can_remove=can_remove_signal
                                             usage=usage_signal
                                             error=error_signal
                                             is_loading=loading_signal
                                             reauth_required=reauth_signal
                                             disabled=any_action_in_flight
+                                            on_switch=Box::new(move || switch_account(id_for_switch.clone()))
                                             on_remove=Box::new(move || remove_account(id_for_remove.clone()))
                                             on_reauth=Box::new(move || reauthenticate_account(id_for_reauth_action.clone()))
                                         />
@@ -428,6 +504,17 @@ pub fn App() -> impl IntoView {
                     }
                 }}
             </p>
+            {move || {
+                if accounts.with(|items| items.is_empty()) {
+                    view! { <span></span> }.into_any()
+                } else {
+                    view! {
+                        <p class="mt-3 font-mono text-[11px] text-[var(--muted-foreground)]">
+                            "export CODEX_HOME=\"$HOME/.wovo/codex/current\""
+                        </p>
+                    }.into_any()
+                }
+            }}
         </main>
     }
 }
@@ -454,29 +541,47 @@ where
 }
 
 #[component]
-fn AccountRow<U, E, L, R, D>(
-    label: String,
-    is_managed: bool,
+fn AccountRow<T, M, A, S, C, X, U, E, L, R, D>(
+    label: T,
+    is_managed: M,
+    is_active: A,
+    is_live_system: S,
+    can_switch: C,
+    can_remove: X,
     usage: U,
     error: E,
     is_loading: L,
     reauth_required: R,
     disabled: D,
+    on_switch: Box<dyn Fn() + Send + Sync>,
     on_remove: Box<dyn Fn() + Send + Sync>,
     on_reauth: Box<dyn Fn() + Send + Sync>,
 ) -> impl IntoView
 where
+    T: Fn() -> String + Send + Sync + 'static,
+    M: Fn() -> bool + Send + Sync + 'static,
+    A: Fn() -> bool + Send + Sync + 'static,
+    S: Fn() -> bool + Send + Sync + 'static,
+    C: Fn() -> bool + Send + Sync + 'static,
+    X: Fn() -> bool + Send + Sync + 'static,
     U: Fn() -> Option<UsageSnapshot> + Send + Sync + 'static,
     E: Fn() -> Option<String> + Send + Sync + 'static,
     L: Fn() -> bool + Send + Sync + 'static,
     R: Fn() -> bool + Send + Sync + 'static,
     D: Fn() -> bool + Send + Sync + 'static,
 {
+    let label = StoredValue::new(label);
+    let is_managed = StoredValue::new(is_managed);
+    let is_active = StoredValue::new(is_active);
+    let is_live_system = StoredValue::new(is_live_system);
+    let can_switch = StoredValue::new(can_switch);
+    let can_remove = StoredValue::new(can_remove);
     let usage = StoredValue::new(usage);
     let error = StoredValue::new(error);
     let is_loading = StoredValue::new(is_loading);
     let reauth_required = StoredValue::new(reauth_required);
     let disabled = StoredValue::new(disabled);
+    let on_switch = StoredValue::new(on_switch);
     let on_remove = StoredValue::new(on_remove);
     let on_reauth = StoredValue::new(on_reauth);
 
@@ -484,6 +589,12 @@ where
     let reauth_required_call = move || reauth_required.with_value(|f| f());
     let disabled_call = move || disabled.with_value(|f| f());
 
+    let label_call = move || label.with_value(|f| f());
+    let is_managed_call = move || is_managed.with_value(|f| f());
+    let is_active_call = move || is_active.with_value(|f| f());
+    let is_live_system_call = move || is_live_system.with_value(|f| f());
+    let can_switch_call = move || can_switch.with_value(|f| f());
+    let can_remove_call = move || can_remove.with_value(|f| f());
     let plan_label = move || usage.with_value(|f| f().and_then(|s| s.plan_type));
     let primary = move || usage.with_value(|f| f().and_then(|s| s.primary));
     let secondary = move || usage.with_value(|f| f().and_then(|s| s.secondary));
@@ -494,12 +605,46 @@ where
         <div class="py-4 first:pt-0 last:pb-0">
             <div class="mb-3 flex items-start justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-baseline gap-2">
-                    <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">{label}</h2>
+                    <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">{label_call}</h2>
+                    {move || {
+                        if is_active_call() {
+                            view! {
+                                <span class="shrink-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">"Active"</span>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
+                    }}
+                    {move || {
+                        if is_live_system_call() {
+                            view! {
+                                <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">"System"</span>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
+                    }}
                     {move || plan_label().map(|plan| view! {
                         <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{plan}</span>
                     })}
                 </div>
                 <div class="flex items-center gap-2 max-sm:justify-end">
+                    {move || {
+                        if can_switch_call() {
+                            view! {
+                                <button
+                                    class="inline-flex h-8 items-center justify-center whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-xs font-medium hover:cursor-pointer hover:bg-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
+                                    type="button"
+                                    disabled=move || disabled_call()
+                                    on:click=move |_| on_switch.with_value(|f| f())
+                                >
+                                    "Use"
+                                </button>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
+                    }}
                     {move || {
                         if reauth_required_call() {
                             let trigger = move |_| on_reauth.with_value(|f| f());
@@ -517,22 +662,24 @@ where
                             view! { <span></span> }.into_any()
                         }
                     }}
-                    {if is_managed {
-                        view! {
-                            <Tooltip text=move || "Remove account".to_string()>
-                                <button
-                                    class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-[var(--muted-foreground)] hover:cursor-pointer hover:border-[var(--border)] hover:bg-[var(--destructive,var(--accent))] hover:text-[var(--destructive-foreground,var(--foreground))] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                                    type="button"
-                                    aria-label="Remove account"
-                                    disabled=move || disabled_call()
-                                    on:click=move |_| on_remove.with_value(|f| f())
-                                >
-                                    <Trash2 class="size-4"/>
-                                </button>
-                            </Tooltip>
-                        }.into_any()
-                    } else {
-                        view! { <span></span> }.into_any()
+                    {move || {
+                        if is_managed_call() && can_remove_call() {
+                            view! {
+                                <Tooltip text=move || "Remove account".to_string()>
+                                    <button
+                                        class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-[var(--muted-foreground)] hover:cursor-pointer hover:border-[var(--border)] hover:bg-[var(--destructive,var(--accent))] hover:text-[var(--destructive-foreground,var(--foreground))] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                                        type="button"
+                                        aria-label="Remove account"
+                                        disabled=move || disabled_call()
+                                        on:click=move |_| on_remove.with_value(|f| f())
+                                    >
+                                        <Trash2 class="size-4"/>
+                                    </button>
+                                </Tooltip>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
                     }}
                 </div>
             </div>

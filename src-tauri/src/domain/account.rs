@@ -18,6 +18,10 @@ pub struct AccountSummary {
     pub home_path: String,
     pub source: AccountSourceKind,
     pub authenticated: bool,
+    pub is_active: bool,
+    pub is_live_system: bool,
+    pub can_switch: bool,
+    pub can_remove: bool,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub last_authenticated_at: Option<i64>,
@@ -42,6 +46,10 @@ impl AccountSummary {
             home_path,
             source: AccountSourceKind::Ambient,
             authenticated: true,
+            is_active: false,
+            is_live_system: true,
+            can_switch: false,
+            can_remove: false,
             created_at: None,
             updated_at: None,
             last_authenticated_at: None,
@@ -56,6 +64,8 @@ impl AccountSummary {
         created_at: i64,
         updated_at: i64,
         last_authenticated_at: Option<i64>,
+        is_active: bool,
+        is_live_system: bool,
     ) -> Self {
         let label = email
             .clone()
@@ -70,9 +80,36 @@ impl AccountSummary {
             home_path,
             source: AccountSourceKind::Managed,
             authenticated: true,
+            is_active,
+            is_live_system,
+            can_switch: !is_active,
+            can_remove: !is_active && !is_live_system,
             created_at: Some(created_at),
             updated_at: Some(updated_at),
             last_authenticated_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_system_managed_accounts_cannot_be_removed() {
+        let account = AccountSummary::managed(
+            "account-id".to_string(),
+            Some("user@example.com".to_string()),
+            Some("provider-id".to_string()),
+            "/tmp/codex".to_string(),
+            1,
+            2,
+            Some(3),
+            false,
+            true,
+        );
+
+        assert!(account.can_switch);
+        assert!(!account.can_remove);
     }
 }
