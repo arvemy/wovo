@@ -980,7 +980,6 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(LoginRunnerState::default())
-        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             add_codex_account,
             cancel_codex_account_login,
