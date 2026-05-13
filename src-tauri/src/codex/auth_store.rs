@@ -80,6 +80,8 @@ pub fn detected_ambient_account() -> Result<Option<AccountSummary>, AppError> {
             credentials.home_path.to_string_lossy().to_string(),
             credentials.email(),
             credentials.provider_account_id(),
+            None,
+            None,
         ))),
         Err(AppError::AuthNotFound) => Ok(None),
         Err(error) => Err(error),

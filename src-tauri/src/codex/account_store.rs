@@ -57,6 +57,10 @@ pub struct ManagedCodexAccountRecord {
     pub id: Uuid,
     pub email: Option<String>,
     pub provider_account_id: Option<String>,
+    #[serde(default)]
+    pub workspace_account_id: Option<String>,
+    #[serde(default)]
+    pub workspace_label: Option<String>,
     pub home_path: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -73,6 +77,8 @@ impl ManagedCodexAccountRecord {
             self.id.to_string(),
             self.email.clone(),
             self.provider_account_id.clone(),
+            self.workspace_account_id.clone(),
+            self.workspace_label.clone(),
             self.home_path.clone(),
             self.created_at,
             self.updated_at,
@@ -219,15 +225,19 @@ impl ManagedCodexAccountStore {
         &self,
         email: Option<&str>,
         provider_account_id: Option<&str>,
+        workspace_account_id: Option<&str>,
     ) -> Result<Option<ManagedCodexAccountRecord>, AppError> {
         let normalized_email = normalize_optional_email(email.map(str::to_string));
         let normalized_provider_account_id =
             normalize_optional(provider_account_id.map(str::to_string));
+        let normalized_workspace_account_id =
+            normalize_optional(workspace_account_id.map(str::to_string));
         let accounts = self.load_accounts()?;
         Ok(find_matching_account_index(
             &accounts,
             normalized_email.as_deref(),
             normalized_provider_account_id.as_deref(),
+            normalized_workspace_account_id.as_deref(),
         )
         .map(|index| accounts[index].clone()))
     }
@@ -241,6 +251,7 @@ impl ManagedCodexAccountStore {
             .ok_or_else(|| AppError::UnknownAccount(account_id.to_string()))
     }
 
+    #[allow(dead_code)]
     pub fn upsert_authenticated_account(
         &self,
         preferred_id: Uuid,
@@ -248,9 +259,34 @@ impl ManagedCodexAccountStore {
         provider_account_id: Option<String>,
         home_path: PathBuf,
     ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError> {
+        self.upsert_authenticated_account_with_workspace(
+            preferred_id,
+            email,
+            provider_account_id,
+            None,
+            None,
+            home_path,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_authenticated_account_with_workspace(
+        &self,
+        preferred_id: Uuid,
+        email: Option<String>,
+        provider_account_id: Option<String>,
+        workspace_account_id: Option<String>,
+        workspace_label: Option<String>,
+        home_path: PathBuf,
+    ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError> {
         let normalized_email = normalize_optional_email(email);
         let normalized_provider_account_id = normalize_optional(provider_account_id);
-        if normalized_email.is_none() && normalized_provider_account_id.is_none() {
+        let normalized_workspace_account_id = normalize_optional(workspace_account_id);
+        let normalized_workspace_label = normalize_optional(workspace_label);
+        let normalized_identity_id = normalized_workspace_account_id
+            .as_deref()
+            .or(normalized_provider_account_id.as_deref());
+        if normalized_email.is_none() && normalized_identity_id.is_none() {
             return Err(AppError::CodexLoginFailed(
                 "login did not produce an account identity".to_string(),
             ));
@@ -266,6 +302,7 @@ impl ManagedCodexAccountStore {
                 &accounts[index],
                 normalized_email.as_deref(),
                 normalized_provider_account_id.as_deref(),
+                normalized_workspace_account_id.as_deref(),
             ) {
                 return Err(AppError::AccountIdentityMismatch);
             }
@@ -275,6 +312,7 @@ impl ManagedCodexAccountStore {
                 &accounts,
                 normalized_email.as_deref(),
                 normalized_provider_account_id.as_deref(),
+                normalized_workspace_account_id.as_deref(),
             )
         };
 
@@ -283,10 +321,26 @@ impl ManagedCodexAccountStore {
             .as_ref()
             .map(|account| account.id)
             .unwrap_or(preferred_id);
+        let preserve_existing_workspace =
+            normalized_workspace_account_id.is_none() && normalized_workspace_label.is_none();
         let record = ManagedCodexAccountRecord {
             id,
             email: normalized_email,
             provider_account_id: normalized_provider_account_id,
+            workspace_account_id: if preserve_existing_workspace {
+                existing
+                    .as_ref()
+                    .and_then(|account| account.workspace_account_id.clone())
+            } else {
+                normalized_workspace_account_id
+            },
+            workspace_label: if preserve_existing_workspace {
+                existing
+                    .as_ref()
+                    .and_then(|account| account.workspace_label.clone())
+            } else {
+                normalized_workspace_label
+            },
             home_path: home_path.to_string_lossy().to_string(),
             created_at: existing
                 .as_ref()
@@ -307,6 +361,7 @@ impl ManagedCodexAccountStore {
         accounts.sort_by(|left, right| {
             left.email
                 .cmp(&right.email)
+                .then_with(|| left.workspace_account_id.cmp(&right.workspace_account_id))
                 .then_with(|| left.provider_account_id.cmp(&right.provider_account_id))
                 .then_with(|| left.id.cmp(&right.id))
         });
@@ -315,6 +370,7 @@ impl ManagedCodexAccountStore {
         Ok((record, replaced_home_paths))
     }
 
+    #[allow(dead_code)]
     pub fn upsert_authenticated_account_and_then<F>(
         &self,
         preferred_id: Uuid,
@@ -326,9 +382,40 @@ impl ManagedCodexAccountStore {
     where
         F: FnOnce(&ManagedCodexAccountRecord) -> Result<(), AppError>,
     {
+        self.upsert_authenticated_account_with_workspace_and_then(
+            preferred_id,
+            email,
+            provider_account_id,
+            None,
+            None,
+            home_path,
+            after_upsert,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_authenticated_account_with_workspace_and_then<F>(
+        &self,
+        preferred_id: Uuid,
+        email: Option<String>,
+        provider_account_id: Option<String>,
+        workspace_account_id: Option<String>,
+        workspace_label: Option<String>,
+        home_path: PathBuf,
+        after_upsert: F,
+    ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError>
+    where
+        F: FnOnce(&ManagedCodexAccountRecord) -> Result<(), AppError>,
+    {
         let previous_accounts = self.load_accounts()?;
-        let (record, replaced_home_paths) =
-            self.upsert_authenticated_account(preferred_id, email, provider_account_id, home_path)?;
+        let (record, replaced_home_paths) = self.upsert_authenticated_account_with_workspace(
+            preferred_id,
+            email,
+            provider_account_id,
+            workspace_account_id,
+            workspace_label,
+            home_path,
+        )?;
 
         if let Err(error) = after_upsert(&record) {
             let error_message = error.to_string();
@@ -342,6 +429,39 @@ impl ManagedCodexAccountStore {
         }
 
         Ok((record, replaced_home_paths))
+    }
+
+    pub fn update_account_workspace(
+        &self,
+        account_id: Uuid,
+        workspace_account_id: Option<String>,
+        workspace_label: Option<String>,
+    ) -> Result<(), AppError> {
+        let normalized_workspace_account_id = normalize_optional(workspace_account_id);
+        let normalized_workspace_label = normalize_optional(workspace_label);
+        if normalized_workspace_account_id.is_none() && normalized_workspace_label.is_none() {
+            return Ok(());
+        }
+
+        let mut accounts = self.load_accounts()?;
+        if let Some(workspace_account_id) = normalized_workspace_account_id.as_deref() {
+            let duplicate = accounts.iter().any(|account| {
+                account.id != account_id
+                    && account.workspace_account_id.as_deref() == Some(workspace_account_id)
+            });
+            if duplicate {
+                return Ok(());
+            }
+        }
+
+        let Some(account) = accounts.iter_mut().find(|account| account.id == account_id) else {
+            return Err(AppError::UnknownAccount(account_id.to_string()));
+        };
+
+        account.workspace_account_id = normalized_workspace_account_id;
+        account.workspace_label = normalized_workspace_label;
+        account.updated_at = OffsetDateTime::now_utc().unix_timestamp();
+        self.store_accounts(accounts)
     }
 
     pub fn import_auth_from_home(
@@ -648,14 +768,16 @@ fn create_symlink(source: &Path, target: &Path) -> Result<(), AppError> {
 fn sanitized_accounts(accounts: Vec<ManagedCodexAccountRecord>) -> Vec<ManagedCodexAccountRecord> {
     let mut sanitized = Vec::new();
     for account in accounts {
+        let account_identity = account_identity_id(&account).map(str::to_string);
         let duplicate = sanitized
             .iter()
             .any(|existing: &ManagedCodexAccountRecord| {
+                let existing_identity_id = account_identity_id(existing);
                 existing.id == account.id
-                    || (account.provider_account_id.is_some()
-                        && existing.provider_account_id == account.provider_account_id)
-                    || (account.provider_account_id.is_none()
-                        && existing.provider_account_id.is_none()
+                    || (account_identity.is_some()
+                        && existing_identity_id == account_identity.as_deref())
+                    || (account_identity.is_none()
+                        && existing_identity_id.is_none()
                         && existing.email == account.email)
             });
         if !duplicate {
@@ -669,27 +791,34 @@ fn find_matching_account_index(
     accounts: &[ManagedCodexAccountRecord],
     email: Option<&str>,
     provider_account_id: Option<&str>,
+    workspace_account_id: Option<&str>,
 ) -> Option<usize> {
-    if let Some(provider_account_id) = provider_account_id {
-        if let Some(index) = accounts
-            .iter()
-            .position(|account| account.provider_account_id.as_deref() == Some(provider_account_id))
-        {
+    if let Some(workspace_account_id) = workspace_account_id {
+        if let Some(index) = accounts.iter().position(|account| {
+            account.workspace_account_id.as_deref() == Some(workspace_account_id)
+        }) {
             return Some(index);
         }
 
-        if let Some(email) = email {
-            return accounts.iter().position(|account| {
-                account.provider_account_id.is_none() && account.email.as_deref() == Some(email)
-            });
-        }
+        return provider_account_id.and_then(|provider_account_id| {
+            accounts.iter().position(|account| {
+                account.workspace_account_id.is_none()
+                    && account.provider_account_id.as_deref() == Some(provider_account_id)
+            })
+        });
+    }
 
-        return None;
+    if let Some(provider_account_id) = provider_account_id {
+        return accounts.iter().position(|account| {
+            account.provider_account_id.as_deref() == Some(provider_account_id)
+        });
     }
 
     let email = email?;
     accounts.iter().position(|account| {
-        account.provider_account_id.is_none() && account.email.as_deref() == Some(email)
+        account.workspace_account_id.is_none()
+            && account.provider_account_id.is_none()
+            && account.email.as_deref() == Some(email)
     })
 }
 
@@ -697,18 +826,39 @@ fn authenticated_identity_matches(
     existing: &ManagedCodexAccountRecord,
     email: Option<&str>,
     provider_account_id: Option<&str>,
+    workspace_account_id: Option<&str>,
 ) -> bool {
-    if let Some(existing_provider_account_id) = existing.provider_account_id.as_deref() {
-        return provider_account_id == Some(existing_provider_account_id);
+    if let Some(workspace_account_id) = workspace_account_id {
+        if existing.workspace_account_id.as_deref() == Some(workspace_account_id) {
+            return true;
+        }
+        return existing.workspace_account_id.is_none()
+            && provider_account_id.is_some()
+            && existing.provider_account_id.as_deref() == provider_account_id;
     }
 
-    if let Some(existing_email) = existing.email.as_deref() {
-        return email
-            .map(|email| email.eq_ignore_ascii_case(existing_email))
-            .unwrap_or(false);
+    if let Some(provider_account_id) = provider_account_id {
+        return existing.provider_account_id.as_deref() == Some(provider_account_id);
     }
 
-    true
+    existing.workspace_account_id.is_none()
+        && existing.provider_account_id.is_none()
+        && existing
+            .email
+            .as_deref()
+            .map(|existing_email| {
+                email
+                    .map(|email| email.eq_ignore_ascii_case(existing_email))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true)
+}
+
+fn account_identity_id(account: &ManagedCodexAccountRecord) -> Option<&str> {
+    account
+        .workspace_account_id
+        .as_deref()
+        .or(account.provider_account_id.as_deref())
 }
 
 fn normalize_optional_email(value: Option<String>) -> Option<String> {
@@ -1204,7 +1354,49 @@ mod tests {
     }
 
     #[test]
-    fn provider_identity_upgrades_legacy_email_account() {
+    fn same_email_with_different_workspace_accounts_can_coexist() {
+        let root = temp_root("same-email-workspaces");
+        let store = ManagedCodexAccountStore::new(root.clone());
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let first_home = store.create_home(first_id).unwrap();
+        let second_home = store.create_home(second_id).unwrap();
+
+        store
+            .upsert_authenticated_account_with_workspace(
+                first_id,
+                Some("user@example.com".to_string()),
+                Some("provider-user".to_string()),
+                Some("workspace-1".to_string()),
+                Some("Personal".to_string()),
+                first_home,
+            )
+            .unwrap();
+        store
+            .upsert_authenticated_account_with_workspace(
+                second_id,
+                Some("user@example.com".to_string()),
+                Some("provider-user".to_string()),
+                Some("workspace-2".to_string()),
+                Some("Team".to_string()),
+                second_home,
+            )
+            .unwrap();
+
+        let loaded = store.load_accounts().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded
+            .iter()
+            .any(|account| account.workspace_account_id.as_deref() == Some("workspace-1")));
+        assert!(loaded
+            .iter()
+            .any(|account| account.workspace_account_id.as_deref() == Some("workspace-2")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_identity_does_not_merge_legacy_email_account() {
         let root = temp_root("legacy-upgrade");
         let store = ManagedCodexAccountStore::new(root.clone());
         let legacy_id = Uuid::new_v4();
@@ -1230,12 +1422,162 @@ mod tests {
             .unwrap();
 
         let loaded = store.load_accounts().unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(record.id, legacy_id);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(record.id, new_id);
         assert_eq!(record.provider_account_id.as_deref(), Some("account-1"));
-        assert_eq!(replaced, vec![legacy_home]);
+        assert!(replaced.is_empty());
+        assert!(loaded
+            .iter()
+            .any(|account| account.id == legacy_id && account.provider_account_id.is_none()));
+        assert!(legacy_home.exists());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_only_lookup_matches_workspace_record_when_workspace_is_unavailable() {
+        let workspace_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let accounts = vec![
+            ManagedCodexAccountRecord {
+                id: workspace_id,
+                email: Some("user@example.com".to_string()),
+                provider_account_id: Some("provider-user".to_string()),
+                workspace_account_id: Some("workspace-1".to_string()),
+                workspace_label: Some("Team".to_string()),
+                home_path: "/tmp/workspace".to_string(),
+                created_at: 1,
+                updated_at: 2,
+                last_authenticated_at: Some(3),
+            },
+            ManagedCodexAccountRecord {
+                id: other_id,
+                email: Some("other@example.com".to_string()),
+                provider_account_id: Some("provider-other".to_string()),
+                workspace_account_id: Some("workspace-2".to_string()),
+                workspace_label: Some("Other".to_string()),
+                home_path: "/tmp/other".to_string(),
+                created_at: 1,
+                updated_at: 2,
+                last_authenticated_at: Some(3),
+            },
+        ];
+
+        let matched = find_matching_account_index(
+            &accounts,
+            Some("user@example.com"),
+            Some("provider-user"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(accounts[matched].id, workspace_id);
+        assert!(authenticated_identity_matches(
+            &accounts[matched],
+            Some("user@example.com"),
+            Some("provider-user"),
+            None
+        ));
+    }
+
+    #[test]
+    fn provider_only_upsert_preserves_existing_workspace_metadata() {
+        let root = temp_root("workspace-preserve");
+        let store = ManagedCodexAccountStore::new(root.clone());
+        let id = Uuid::new_v4();
+        let original_home = store.create_home(id).unwrap();
+        let refreshed_home = store.create_home(Uuid::new_v4()).unwrap();
+
+        store
+            .upsert_authenticated_account_with_workspace(
+                id,
+                Some("user@example.com".to_string()),
+                Some("provider-user".to_string()),
+                Some("workspace-1".to_string()),
+                Some("Team".to_string()),
+                original_home,
+            )
+            .unwrap();
+
+        let (record, _replaced) = store
+            .upsert_authenticated_account(
+                Uuid::new_v4(),
+                Some("user@example.com".to_string()),
+                Some("provider-user".to_string()),
+                refreshed_home,
+            )
+            .unwrap();
+
+        let loaded = store.load_accounts().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(record.id, id);
+        assert_eq!(record.workspace_account_id.as_deref(), Some("workspace-1"));
+        assert_eq!(record.workspace_label.as_deref(), Some("Team"));
+        assert_eq!(
+            loaded[0].workspace_account_id.as_deref(),
+            Some("workspace-1")
+        );
+        assert_eq!(loaded[0].workspace_label.as_deref(), Some("Team"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolved_workspace_lookup_does_not_match_different_workspace_with_same_provider() {
+        let accounts = vec![ManagedCodexAccountRecord {
+            id: Uuid::new_v4(),
+            email: Some("user@example.com".to_string()),
+            provider_account_id: Some("provider-user".to_string()),
+            workspace_account_id: Some("workspace-1".to_string()),
+            workspace_label: Some("Team".to_string()),
+            home_path: "/tmp/workspace".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            last_authenticated_at: Some(3),
+        }];
+
+        assert!(find_matching_account_index(
+            &accounts,
+            Some("user@example.com"),
+            Some("provider-user"),
+            Some("workspace-2"),
+        )
+        .is_none());
+        assert!(!authenticated_identity_matches(
+            &accounts[0],
+            Some("user@example.com"),
+            Some("provider-user"),
+            Some("workspace-2")
+        ));
+    }
+
+    #[test]
+    fn email_only_lookup_does_not_match_workspace_record() {
+        let account = ManagedCodexAccountRecord {
+            id: Uuid::new_v4(),
+            email: Some("user@example.com".to_string()),
+            provider_account_id: Some("provider-user".to_string()),
+            workspace_account_id: Some("workspace-1".to_string()),
+            workspace_label: Some("Team".to_string()),
+            home_path: "/tmp/workspace".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            last_authenticated_at: Some(3),
+        };
+
+        assert!(find_matching_account_index(
+            std::slice::from_ref(&account),
+            Some("user@example.com"),
+            None,
+            None
+        )
+        .is_none());
+        assert!(!authenticated_identity_matches(
+            &account,
+            Some("user@example.com"),
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -1404,6 +1746,8 @@ mod tests {
                 id,
                 email: Some("user@example.com".to_string()),
                 provider_account_id: Some("account-1".to_string()),
+                workspace_account_id: None,
+                workspace_label: None,
                 home_path: legacy_home.to_string_lossy().to_string(),
                 created_at: 1,
                 updated_at: 2,

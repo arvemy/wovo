@@ -15,6 +15,8 @@ pub struct AccountSummary {
     pub label: String,
     pub email: Option<String>,
     pub provider_account_id: Option<String>,
+    pub workspace_account_id: Option<String>,
+    pub workspace_label: Option<String>,
     pub home_path: String,
     pub source: AccountSourceKind,
     pub authenticated: bool,
@@ -31,9 +33,13 @@ impl AccountSummary {
         home_path: String,
         email: Option<String>,
         provider_account_id: Option<String>,
+        workspace_account_id: Option<String>,
+        workspace_label: Option<String>,
     ) -> Self {
         let label = email
             .clone()
+            .or_else(|| workspace_label.clone())
+            .or_else(|| workspace_account_id.clone())
             .or_else(|| provider_account_id.clone())
             .unwrap_or_else(|| "Local Codex account".to_string());
 
@@ -42,6 +48,8 @@ impl AccountSummary {
             label,
             email,
             provider_account_id,
+            workspace_account_id,
+            workspace_label,
             home_path,
             source: AccountSourceKind::Ambient,
             authenticated: true,
@@ -59,6 +67,8 @@ impl AccountSummary {
         id: String,
         email: Option<String>,
         provider_account_id: Option<String>,
+        workspace_account_id: Option<String>,
+        workspace_label: Option<String>,
         home_path: String,
         created_at: i64,
         updated_at: i64,
@@ -67,6 +77,8 @@ impl AccountSummary {
     ) -> Self {
         let label = email
             .clone()
+            .or_else(|| workspace_label.clone())
+            .or_else(|| workspace_account_id.clone())
             .or_else(|| provider_account_id.clone())
             .unwrap_or_else(|| "Managed Codex account".to_string());
 
@@ -75,6 +87,8 @@ impl AccountSummary {
             label,
             email,
             provider_account_id,
+            workspace_account_id,
+            workspace_label,
             home_path,
             source: AccountSourceKind::Managed,
             authenticated: true,
@@ -98,6 +112,8 @@ mod tests {
             "account-id".to_string(),
             Some("user@example.com".to_string()),
             Some("provider-id".to_string()),
+            Some("workspace-id".to_string()),
+            Some("Personal".to_string()),
             "/tmp/codex".to_string(),
             1,
             2,

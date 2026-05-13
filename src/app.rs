@@ -33,11 +33,42 @@ enum AccountSourceKind {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageSnapshot {
+    source: String,
     plan_type: Option<String>,
     primary: Option<UsageWindow>,
     secondary: Option<UsageWindow>,
     credits: Option<CreditsSnapshot>,
     updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CodexUsageSourceMode {
+    Auto,
+    Oauth,
+    Cli,
+}
+
+impl CodexUsageSourceMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Oauth => "OAuth",
+            Self::Cli => "CLI",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSettings {
+    usage_source_mode: CodexUsageSourceMode,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetUsageSourceModeArgs {
+    usage_source_mode: CodexUsageSourceMode,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -99,6 +130,8 @@ pub fn App() -> impl IntoView {
     let (errors_by_id, set_errors_by_id) = signal::<HashMap<String, String>>(HashMap::new());
     let (loading_ids, set_loading_ids) = signal::<HashSet<String>>(HashSet::new());
     let (reauth_ids, set_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
+    let (usage_source_mode, set_usage_source_mode) = signal(CodexUsageSourceMode::Auto);
+    let (is_settings_loading, set_is_settings_loading) = signal(true);
     let (is_listing, set_is_listing) = signal(true);
     let (is_account_action_loading, set_is_account_action_loading) = signal(false);
     let (global_error, set_global_error) = signal::<Option<String>>(None);
@@ -187,6 +220,54 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let load_settings = move || {
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            match invoke_tauri::<CodexSettings>("get_codex_settings", JsValue::UNDEFINED).await {
+                Ok(settings) => set_usage_source_mode.set(settings.usage_source_mode),
+                Err(error) => set_global_error.set(Some(error.message)),
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    let change_usage_source_mode = move |mode: CodexUsageSourceMode| {
+        if mode == usage_source_mode.get_untracked() {
+            return;
+        }
+        let previous = usage_source_mode.get_untracked();
+        set_usage_source_mode.set(mode);
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args = serde_wasm_bindgen::to_value(&SetUsageSourceModeArgs {
+                usage_source_mode: mode,
+            })
+            .map_err(|error| CommandError::from_message(error.to_string()));
+
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>("set_codex_usage_source_mode", args).await {
+                        Ok(settings) => {
+                            set_usage_source_mode.set(settings.usage_source_mode);
+                            load_accounts_and_usage();
+                        }
+                        Err(error) => {
+                            set_usage_source_mode.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_usage_source_mode.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    load_settings();
     load_accounts_and_usage();
 
     let refresh_all = move |_| {
@@ -302,13 +383,44 @@ pub fn App() -> impl IntoView {
                 />
             </header>
 
-            <div class="mb-5 flex items-center justify-between gap-3">
+            <div class="mb-5 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-center gap-3">
                     <img src="/public/openai-black.svg" class="size-12 shrink-0 dark:hidden" alt="OpenAI"/>
                     <img src="/public/openai-white.svg" class="hidden size-12 shrink-0 dark:block" alt="OpenAI"/>
                     <h1 class="text-lg font-semibold leading-none tracking-tight">"Codex"</h1>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 max-sm:justify-between">
+                    <div
+                        class="inline-grid h-9 grid-cols-3 rounded-md border border-[var(--border)] bg-[var(--secondary)] p-0.5"
+                        role="group"
+                        aria-label="Usage source"
+                    >
+                        {move || {
+                            [CodexUsageSourceMode::Auto, CodexUsageSourceMode::Oauth, CodexUsageSourceMode::Cli]
+                                .into_iter()
+                                .map(|mode| {
+                                    let selected = move || usage_source_mode.get() == mode;
+                                    view! {
+                                        <button
+                                            class=move || {
+                                                if selected() {
+                                                    "inline-flex min-w-12 items-center justify-center rounded-sm bg-[var(--background)] px-2 text-[11px] font-semibold text-[var(--foreground)] shadow-xs transition-colors"
+                                                } else {
+                                                    "inline-flex min-w-12 items-center justify-center rounded-sm px-2 text-[11px] font-medium text-[var(--muted-foreground)] transition-colors hover:cursor-pointer hover:text-[var(--foreground)]"
+                                                }
+                                            }
+                                            type="button"
+                                            aria-pressed=move || selected().to_string()
+                                            disabled=move || is_listing.get() || is_settings_loading.get() || any_action_in_flight()
+                                            on:click=move |_| change_usage_source_mode(mode)
+                                        >
+                                            {mode.label()}
+                                        </button>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </div>
                     <Tooltip text=move || {
                         if is_account_action_loading.get() {
                             "Cancel login".to_string()
@@ -572,6 +684,7 @@ where
     let can_set_system_call = move || can_set_system.with_value(|f| f());
     let can_remove_call = move || can_remove.with_value(|f| f());
     let plan_label = move || usage.with_value(|f| f().and_then(|s| s.plan_type));
+    let usage_source = move || usage.with_value(|f| f().map(|s| s.source));
     let primary = move || usage.with_value(|f| f().and_then(|s| s.primary));
     let secondary = move || usage.with_value(|f| f().and_then(|s| s.secondary));
     let credits = move || usage.with_value(|f| f().and_then(|s| s.credits));
@@ -593,6 +706,9 @@ where
                     }}
                     {move || plan_label().map(|plan| view! {
                         <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{plan}</span>
+                    })}
+                    {move || usage_source().map(|source| view! {
+                        <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{source}</span>
                     })}
                 </div>
                 <div class="flex items-center gap-2 max-sm:justify-end">
