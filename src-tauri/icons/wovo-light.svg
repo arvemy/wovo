@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Wovo app icon monochrome white background black accent">
+  <rect x="40" y="40" width="944" height="944" rx="150" fill="#FFFFFF" stroke="#000000" stroke-width="4"/>
+
+  <!-- Arc -->
+  <path d="M 222 438 Q 260 280 398 220" fill="none" stroke="#000000" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 626 220 Q 764 280 802 438" fill="none" stroke="#000000" stroke-width="18" stroke-linecap="round"/>
+
+  <!-- End nodes -->
+  <circle cx="222" cy="438" r="23" fill="#FFFFFF" stroke="#000000" stroke-width="15"/>
+  <circle cx="802" cy="438" r="23" fill="#FFFFFF" stroke="#000000" stroke-width="15"/>
+
+  <!-- Sparkle and dots -->
+  <path d="M512 178
+           C523 212 534 223 568 234
+           C534 245 523 256 512 290
+           C501 256 490 245 456 234
+           C490 223 501 212 512 178Z"
+        fill="#000000"/>
+  <circle cx="512" cy="160" r="10" fill="#000000"/>
+  <circle cx="512" cy="302" r="10" fill="#000000"/>
+  <circle cx="430" cy="234" r="9" fill="#000000"/>
+  <circle cx="594" cy="234" r="9" fill="#000000"/>
+
+  <!-- Bars -->
+  <rect x="387" y="412" width="58" height="86" rx="16" fill="#000000"/>
+  <rect x="478" y="333" width="58" height="165" rx="16" fill="#000000"/>
+  <rect x="569" y="278" width="58" height="220" rx="16" fill="#000000"/>
+
+  <!-- W mark -->
+  <path d="M 252 530 L 392 828 L 512 575 L 632 828 L 772 530"
+        fill="none"
+        stroke="#000000"
+        stroke-width="120"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>

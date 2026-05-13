@@ -9,7 +9,7 @@ use crate::ui::{
     separator::Separator,
     tooltip::{Tooltip, TooltipContent, TooltipPosition},
 };
-use icons::{EllipsisVertical, LoaderCircle, Plus, RefreshCw, Trash2, X};
+use icons::{EllipsisVertical, LoaderCircle, Monitor, Moon, Plus, RefreshCw, Sun, Trash2, X};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -25,6 +25,12 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_namespace = ["window", "__TAURI__", "event"])]
     async fn listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["window", "__WOVO_THEME"], js_name = get)]
+    fn get_theme_preference() -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["window", "__WOVO_THEME"], js_name = set)]
+    fn set_theme_preference(mode: &str) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -102,6 +108,40 @@ impl CodexUsageSourceMode {
             Self::Auto => "Auto",
             Self::Oauth => "OAuth",
             Self::Cli => "CLI",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemeMode {
+    Light,
+    Dark,
+    Auto,
+}
+
+impl ThemeMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light Mode",
+            Self::Dark => "Dark Mode",
+            Self::Auto => "Auto (System)",
+        }
+    }
+
+    fn storage_value(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::Auto => "auto",
+        }
+    }
+
+    fn from_storage_value(value: &str) -> Option<Self> {
+        match value {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            "auto" => Some(Self::Auto),
+            _ => None,
         }
     }
 }
@@ -205,6 +245,7 @@ struct CommandError {
 
 #[component]
 pub fn App() -> impl IntoView {
+    let initial_theme_mode = current_theme_preference();
     let (accounts, set_accounts) = signal::<Vec<AccountSummary>>(Vec::new());
     let (usage_by_id, set_usage_by_id) = signal::<HashMap<String, UsageSnapshot>>(HashMap::new());
     let (errors_by_id, set_errors_by_id) = signal::<HashMap<String, String>>(HashMap::new());
@@ -214,6 +255,7 @@ pub fn App() -> impl IntoView {
     let (loading_ids, set_loading_ids) = signal::<HashSet<String>>(HashSet::new());
     let (reauth_ids, set_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
     let (usage_source_mode, set_usage_source_mode) = signal(CodexUsageSourceMode::Auto);
+    let (theme_mode, set_theme_mode) = signal(initial_theme_mode);
     let (cost_usage_enabled, set_cost_usage_enabled) = signal(false);
     let (notifications_enabled, set_notifications_enabled) = signal(true);
     let (is_menu_open, set_is_menu_open) = signal(false);
@@ -311,6 +353,17 @@ pub fn App() -> impl IntoView {
             }
             set_is_settings_loading.set(false);
         });
+    };
+
+    let change_theme_mode = move |mode: ThemeMode| {
+        if mode == theme_mode.get_untracked() {
+            return;
+        }
+
+        set_theme_mode.set(mode);
+        if let Err(error) = set_theme_preference(mode.storage_value()) {
+            set_global_error.set(Some(js_command_error(&error).message));
+        }
     };
 
     let change_usage_source_mode = move |mode: CodexUsageSourceMode| {
@@ -586,7 +639,7 @@ pub fn App() -> impl IntoView {
                 <div class="flex items-center gap-2 max-sm:justify-end">
                     <Tooltip>
                         <button
-                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("".to_string())
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                             type="button"
                             aria-label=move || {
                                 if is_account_action_loading.get() {
@@ -616,7 +669,7 @@ pub fn App() -> impl IntoView {
                     </Tooltip>
                     <Tooltip>
                         <button
-                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("".to_string())
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                             type="button"
                             aria-label="Refresh all accounts"
                             on:click=refresh_all
@@ -636,7 +689,7 @@ pub fn App() -> impl IntoView {
                     </Tooltip>
                     <div class="relative">
                         <button
-                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("".to_string())
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                             type="button"
                             aria-label="Settings"
                             aria-expanded=move || is_menu_open.get().to_string()
@@ -650,6 +703,42 @@ pub fn App() -> impl IntoView {
                                 on:click=move |_| set_is_menu_open.set(false)
                             />
                             <div class="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-border bg-background p-1.5 shadow-md">
+                                <div class="px-2 py-1.5">
+                                    <p class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                        "Theme"
+                                    </p>
+                                    <div
+                                        class="grid gap-1"
+                                        role="group"
+                                        aria-label="Theme"
+                                    >
+                                        {[ThemeMode::Light, ThemeMode::Dark, ThemeMode::Auto]
+                                            .into_iter()
+                                            .map(|mode| {
+                                                let selected = move || theme_mode.get() == mode;
+                                                view! {
+                                                    <button
+                                                        class=move || theme_menu_item_class(selected())
+                                                        type="button"
+                                                        aria-pressed=move || selected().to_string()
+                                                        on:click=move |_| change_theme_mode(mode)
+                                                    >
+                                                        <span class="flex min-w-0 items-center gap-2">
+                                                            {match mode {
+                                                                ThemeMode::Light => view! { <Sun class="size-3.5 shrink-0"/> }.into_any(),
+                                                                ThemeMode::Dark => view! { <Moon class="size-3.5 shrink-0"/> }.into_any(),
+                                                                ThemeMode::Auto => view! { <Monitor class="size-3.5 shrink-0"/> }.into_any(),
+                                                            }}
+                                                            <span class="truncate">{mode.label()}</span>
+                                                        </span>
+                                                    </button>
+                                                }
+                                            })
+                                            .collect_view()
+                                        }
+                                    </div>
+                                </div>
+                                <div class="my-1 h-px bg-border"/>
                                 <div class="px-2 py-1.5">
                                     <p class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                                         "Usage Source"
@@ -1086,7 +1175,7 @@ where
                 <div class="flex items-center gap-2 max-sm:justify-end">
                     {move || can_set_system_call().then(|| view! {
                         <button
-                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("".to_string())
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("")
                             type="button"
                             disabled=move || disabled_for_set_system.with_value(|f| f())
                             on:click=move |_| on_set_system.with_value(|f| f())
@@ -1098,7 +1187,7 @@ where
                         let trigger = move |_| on_reauth.with_value(|f| f());
                         view! {
                             <button
-                                class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("".to_string())
+                                class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("")
                                 type="button"
                                 disabled=move || disabled_for_reauth.with_value(|f| f())
                                 on:click=trigger
@@ -1110,7 +1199,7 @@ where
                     {move || (is_managed_call() && can_remove_call()).then(|| view! {
                         <Tooltip>
                             <button
-                                class=ButtonClass { variant: ButtonVariant::Ghost, size: ButtonSize::Icon }.with_class("text-muted-foreground hover:text-destructive-foreground hover:bg-destructive".to_string())
+                                class=ButtonClass { variant: ButtonVariant::Ghost, size: ButtonSize::Icon }.with_class("text-muted-foreground hover:text-destructive-foreground hover:bg-destructive")
                                 type="button"
                                 aria-label="Remove account"
                                 disabled=move || disabled_for_remove.with_value(|f| f())
@@ -1252,6 +1341,22 @@ fn js_command_error(value: &JsValue) -> CommandError {
 impl CommandError {
     fn from_message(message: String) -> Self {
         Self { message }
+    }
+}
+
+fn current_theme_preference() -> ThemeMode {
+    get_theme_preference()
+        .ok()
+        .and_then(|value| value.as_string())
+        .and_then(|value| ThemeMode::from_storage_value(&value))
+        .unwrap_or(ThemeMode::Auto)
+}
+
+fn theme_menu_item_class(selected: bool) -> &'static str {
+    if selected {
+        "flex h-8 w-full items-center justify-between rounded-sm bg-accent px-2 text-sm font-medium text-accent-foreground transition-colors"
+    } else {
+        "flex h-8 w-full items-center justify-between rounded-sm px-2 text-sm font-medium text-muted-foreground transition-colors hover:cursor-pointer hover:bg-accent hover:text-accent-foreground"
     }
 }
 

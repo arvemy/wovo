@@ -5,11 +5,66 @@
     <title>Wovo</title>
     <script>
       (function () {
+        var storageKey = 'wovo.theme';
+        var root = document.documentElement;
         var mq = window.matchMedia('(prefers-color-scheme: dark)');
-        if (mq.matches) document.documentElement.classList.add('dark');
-        mq.addEventListener('change', function (e) {
-          document.documentElement.classList.toggle('dark', e.matches);
-        });
+        var mode = readMode();
+
+        function normalizeMode(value) {
+          return value === 'light' || value === 'dark' || value === 'auto'
+            ? value
+            : 'auto';
+        }
+
+        function readMode() {
+          try {
+            return normalizeMode(window.localStorage.getItem(storageKey));
+          } catch (_) {
+            return 'auto';
+          }
+        }
+
+        function writeMode(nextMode) {
+          try {
+            window.localStorage.setItem(storageKey, nextMode);
+          } catch (_) {}
+        }
+
+        function applyMode(nextMode) {
+          if (nextMode) {
+            mode = normalizeMode(nextMode);
+            writeMode(mode);
+          }
+
+          var systemTheme = mq.matches ? 'dark' : 'light';
+          var shouldUseDark = mode === 'dark' || (mode === 'auto' && mq.matches);
+          root.classList.toggle('dark', shouldUseDark);
+          root.setAttribute('data-theme', mode);
+          root.setAttribute('data-system-theme', systemTheme);
+
+          return mode;
+        }
+
+        window.__WOVO_THEME = {
+          get: function () {
+            return mode;
+          },
+          set: function (nextMode) {
+            return applyMode(nextMode);
+          },
+        };
+
+        applyMode();
+
+        if (typeof mq.addEventListener === 'function') {
+          mq.addEventListener('change', function () {
+            applyMode();
+          });
+        } else if (typeof mq.addListener === 'function') {
+          mq.addListener(function () {
+            applyMode();
+          });
+        }
       })();
     </script>
     <link data-trunk rel="css" href="styles.css" />

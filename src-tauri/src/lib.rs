@@ -31,6 +31,11 @@ const SNAPSHOT_EVENT: &str = "codex:snapshot-updated";
 const REMOTE_USAGE_REFRESH_SECONDS: u64 = 5 * 60;
 const COST_USAGE_REFRESH_SECONDS: u64 = 60 * 60;
 
+#[cfg(desktop)]
+const WOVO_LIGHT_WINDOW_ICON: &[u8] = include_bytes!("../icons/wovo-window-light.png");
+#[cfg(desktop)]
+const WOVO_DARK_WINDOW_ICON: &[u8] = include_bytes!("../icons/wovo-window-dark.png");
+
 #[tauri::command]
 fn get_detected_codex_account() -> Result<Option<AccountSummary>, AppError> {
     detected_ambient_account()
@@ -1115,6 +1120,7 @@ pub fn run() {
         .manage(LoginRunnerState::default())
         .manage(snapshot_coordinator.clone())
         .setup(move |app| {
+            configure_window_icon(app);
             start_codex_snapshot_tasks(app.handle().clone(), snapshot_coordinator.clone());
             Ok(())
         })
@@ -1137,6 +1143,42 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(desktop)]
+fn configure_window_icon<R: tauri::Runtime>(app: &tauri::App<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if let Ok(theme) = window.theme() {
+        apply_window_icon_for_theme(&window, theme);
+    }
+
+    let window_for_event = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::ThemeChanged(theme) = event {
+            apply_window_icon_for_theme(&window_for_event, *theme);
+        }
+    });
+}
+
+#[cfg(not(desktop))]
+fn configure_window_icon<R: tauri::Runtime>(_app: &tauri::App<R>) {}
+
+#[cfg(desktop)]
+fn apply_window_icon_for_theme<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    theme: tauri::Theme,
+) {
+    let icon_bytes = match theme {
+        tauri::Theme::Dark => WOVO_DARK_WINDOW_ICON,
+        _ => WOVO_LIGHT_WINDOW_ICON,
+    };
+
+    if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
+        let _ = window.set_icon(icon);
+    }
 }
 
 fn start_codex_snapshot_tasks(app: AppHandle, coordinator: Arc<CodexSnapshotCoordinator>) {
