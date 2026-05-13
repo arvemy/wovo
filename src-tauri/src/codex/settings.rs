@@ -22,6 +22,7 @@ pub enum CodexUsageSourceMode {
 pub struct CodexSettings {
     pub usage_source_mode: CodexUsageSourceMode,
     pub cost_usage_enabled: bool,
+    pub notifications_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +32,8 @@ struct StoredCodexSettings {
     usage_source_mode: Option<CodexUsageSourceMode>,
     #[serde(default)]
     cost_usage_enabled: Option<bool>,
+    #[serde(default)]
+    notifications_enabled: Option<bool>,
 }
 
 impl Default for CodexSettings {
@@ -38,6 +41,7 @@ impl Default for CodexSettings {
         Self {
             usage_source_mode: CodexUsageSourceMode::Auto,
             cost_usage_enabled: false,
+            notifications_enabled: true,
         }
     }
 }
@@ -56,6 +60,13 @@ pub fn save_usage_source_mode(mode: CodexUsageSourceMode) -> Result<CodexSetting
 pub fn save_cost_usage_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
     let mut settings = load_settings()?;
     settings.cost_usage_enabled = enabled;
+    save_settings_to_path(&settings_path(), &settings)?;
+    Ok(settings)
+}
+
+pub fn save_notifications_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
+    let mut settings = load_settings()?;
+    settings.notifications_enabled = enabled;
     save_settings_to_path(&settings_path(), &settings)?;
     Ok(settings)
 }
@@ -88,6 +99,7 @@ fn load_settings_from_path_with_codex_home(
         cost_usage_enabled: stored
             .cost_usage_enabled
             .unwrap_or_else(|| cost_usage::local_codex_logs_exist(codex_home)),
+        notifications_enabled: stored.notifications_enabled.unwrap_or(true),
     })
 }
 
@@ -154,6 +166,7 @@ mod tests {
         let settings = CodexSettings {
             usage_source_mode: CodexUsageSourceMode::Cli,
             cost_usage_enabled: true,
+            notifications_enabled: false,
         };
 
         save_settings_to_path(&path, &settings).unwrap();

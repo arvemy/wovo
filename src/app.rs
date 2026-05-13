@@ -1,9 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
-use icons::{LoaderCircle, Plus, RefreshCw, Trash2};
+use crate::ui::{
+    alert::{Alert, AlertDescription},
+    badge::{Badge, BadgeSize, BadgeVariant},
+    button::{ButtonClass, ButtonSize, ButtonVariant},
+    card::{Card, CardSize},
+    checkbox::Checkbox,
+    separator::Separator,
+    tooltip::{Tooltip, TooltipContent, TooltipPosition},
+};
+use icons::{EllipsisVertical, LoaderCircle, Plus, RefreshCw, Trash2, X};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tw_merge::IntoTailwindClass;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -101,6 +111,7 @@ impl CodexUsageSourceMode {
 struct CodexSettings {
     usage_source_mode: CodexUsageSourceMode,
     cost_usage_enabled: bool,
+    notifications_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -112,6 +123,12 @@ struct SetUsageSourceModeArgs {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetCostUsageEnabledArgs {
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetNotificationsEnabledArgs {
     enabled: bool,
 }
 
@@ -198,6 +215,8 @@ pub fn App() -> impl IntoView {
     let (reauth_ids, set_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
     let (usage_source_mode, set_usage_source_mode) = signal(CodexUsageSourceMode::Auto);
     let (cost_usage_enabled, set_cost_usage_enabled) = signal(false);
+    let (notifications_enabled, set_notifications_enabled) = signal(true);
+    let (is_menu_open, set_is_menu_open) = signal(false);
     let (cost_usage, set_cost_usage) = signal::<Option<CostUsageSnapshot>>(None);
     let (cost_error, set_cost_error) = signal::<Option<String>>(None);
     let (snapshot_generated_at, set_snapshot_generated_at) = signal::<Option<i64>>(None);
@@ -286,6 +305,7 @@ pub fn App() -> impl IntoView {
                 Ok(settings) => {
                     set_usage_source_mode.set(settings.usage_source_mode);
                     set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                    set_notifications_enabled.set(settings.notifications_enabled);
                 }
                 Err(error) => set_global_error.set(Some(error.message)),
             }
@@ -313,6 +333,7 @@ pub fn App() -> impl IntoView {
                         Ok(settings) => {
                             set_usage_source_mode.set(settings.usage_source_mode);
                             set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                            set_notifications_enabled.set(settings.notifications_enabled);
                             refresh_overview_snapshot(true);
                         }
                         Err(error) => {
@@ -354,6 +375,7 @@ pub fn App() -> impl IntoView {
                         Ok(settings) => {
                             set_usage_source_mode.set(settings.usage_source_mode);
                             set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                            set_notifications_enabled.set(settings.notifications_enabled);
                             refresh_overview_snapshot(true);
                         }
                         Err(error) => {
@@ -364,6 +386,44 @@ pub fn App() -> impl IntoView {
                 }
                 Err(error) => {
                     set_cost_usage_enabled.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    let change_notifications_enabled = move |enabled: bool| {
+        if enabled == notifications_enabled.get_untracked() {
+            return;
+        }
+        let previous = notifications_enabled.get_untracked();
+        set_notifications_enabled.set(enabled);
+
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args = serde_wasm_bindgen::to_value(&SetNotificationsEnabledArgs { enabled })
+                .map_err(|error| CommandError::from_message(error.to_string()));
+
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>("set_codex_notifications_enabled", args)
+                        .await
+                    {
+                        Ok(settings) => {
+                            set_usage_source_mode.set(settings.usage_source_mode);
+                            set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                            set_notifications_enabled.set(settings.notifications_enabled);
+                        }
+                        Err(error) => {
+                            set_notifications_enabled.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_notifications_enabled.set(previous);
                     set_global_error.set(Some(error.message));
                 }
             }
@@ -516,74 +576,17 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <main class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-[var(--background)] py-6 text-[var(--foreground)] max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4">
-            <header class="mb-4 flex items-center justify-start">
-                <img
-                    class="h-20 w-auto drop-shadow-sm max-sm:h-16"
-                    src="/public/wovo-logo.png"
-                    alt="Wovo"
-                />
-            </header>
-
+        <main class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-background py-6 text-foreground max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4">
             <div class="mb-5 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-center gap-3">
                     <img src="/public/openai-black.svg" class="size-12 shrink-0 dark:hidden" alt="OpenAI"/>
                     <img src="/public/openai-white.svg" class="hidden size-12 shrink-0 dark:block" alt="OpenAI"/>
                     <h1 class="text-lg font-semibold leading-none tracking-tight">"Codex"</h1>
                 </div>
-                <div class="flex items-center gap-2 max-sm:justify-between">
-                    <div
-                        class="inline-grid h-9 grid-cols-3 rounded-md border border-[var(--border)] bg-[var(--secondary)] p-0.5"
-                        role="group"
-                        aria-label="Usage source"
-                    >
-                        {move || {
-                            [CodexUsageSourceMode::Auto, CodexUsageSourceMode::Oauth, CodexUsageSourceMode::Cli]
-                                .into_iter()
-                                .map(|mode| {
-                                    let selected = move || usage_source_mode.get() == mode;
-                                    view! {
-                                        <button
-                                            class=move || {
-                                                if selected() {
-                                                    "inline-flex min-w-12 items-center justify-center rounded-sm bg-[var(--background)] px-2 text-[11px] font-semibold text-[var(--foreground)] shadow-xs transition-colors"
-                                                } else {
-                                                    "inline-flex min-w-12 items-center justify-center rounded-sm px-2 text-[11px] font-medium text-[var(--muted-foreground)] transition-colors hover:cursor-pointer hover:text-[var(--foreground)]"
-                                                }
-                                            }
-                                            type="button"
-                                            aria-pressed=move || selected().to_string()
-                                            disabled=move || is_listing.get() || is_settings_loading.get() || any_action_in_flight()
-                                            on:click=move |_| change_usage_source_mode(mode)
-                                        >
-                                            {mode.label()}
-                                        </button>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </div>
-                    <Tooltip text=move || "Track local token cost".to_string()>
-                        <label class="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 text-[11px] font-semibold text-[var(--foreground)] hover:cursor-pointer">
-                            <input
-                                class="h-3.5 w-3.5 accent-[var(--foreground)]"
-                                type="checkbox"
-                                prop:checked=move || cost_usage_enabled.get()
-                                disabled=move || is_listing.get() || is_settings_loading.get() || any_action_in_flight()
-                                on:change=move |event| change_cost_usage_enabled(event_target_checked(&event))
-                            />
-                            <span>"Cost"</span>
-                        </label>
-                    </Tooltip>
-                    <Tooltip text=move || {
-                        if is_account_action_loading.get() {
-                            "Cancel login".to_string()
-                        } else {
-                            "Add Codex account".to_string()
-                        }
-                    }>
+                <div class="flex items-center gap-2 max-sm:justify-end">
+                    <Tooltip>
                         <button
-                            class="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--background)] text-[var(--foreground)] transition-all hover:cursor-pointer hover:bg-[var(--accent)] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("".to_string())
                             type="button"
                             aria-label=move || {
                                 if is_account_action_loading.get() {
@@ -607,10 +610,13 @@ pub fn App() -> impl IntoView {
                                 view! { <Plus class="size-4"/> }.into_any()
                             }}
                         </button>
+                        <TooltipContent position=TooltipPosition::Bottom>
+                            {move || if is_account_action_loading.get() { "Cancel login" } else { "Add Codex account" }}
+                        </TooltipContent>
                     </Tooltip>
-                    <Tooltip text=move || "Refresh all accounts".to_string()>
+                    <Tooltip>
                         <button
-                            class="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--background)] text-[var(--foreground)] transition-all hover:cursor-pointer hover:bg-[var(--accent)] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("".to_string())
                             type="button"
                             aria-label="Refresh all accounts"
                             on:click=refresh_all
@@ -624,7 +630,85 @@ pub fn App() -> impl IntoView {
                                 }
                             }}
                         </button>
+                        <TooltipContent position=TooltipPosition::Bottom>
+                            "Refresh all accounts"
+                        </TooltipContent>
                     </Tooltip>
+                    <div class="relative">
+                        <button
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("".to_string())
+                            type="button"
+                            aria-label="Settings"
+                            aria-expanded=move || is_menu_open.get().to_string()
+                            on:click=move |_| set_is_menu_open.update(|o| *o = !*o)
+                        >
+                            <EllipsisVertical class="size-4"/>
+                        </button>
+                        {move || is_menu_open.get().then(|| view! {
+                            <div
+                                class="fixed inset-0 z-40"
+                                on:click=move |_| set_is_menu_open.set(false)
+                            />
+                            <div class="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-border bg-background p-1.5 shadow-md">
+                                <div class="px-2 py-1.5">
+                                    <p class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                        "Usage Source"
+                                    </p>
+                                    <div
+                                        class="inline-grid h-8 w-full grid-cols-3 rounded-md border border-border bg-secondary p-0.5"
+                                        role="group"
+                                        aria-label="Usage source"
+                                    >
+                                        {[CodexUsageSourceMode::Auto, CodexUsageSourceMode::Oauth, CodexUsageSourceMode::Cli]
+                                            .into_iter()
+                                            .map(|mode| {
+                                                let selected = move || usage_source_mode.get() == mode;
+                                                view! {
+                                                    <button
+                                                        class=move || if selected() {
+                                                            "inline-flex min-w-12 items-center justify-center rounded-sm bg-background px-2 text-[11px] font-semibold text-foreground shadow-xs transition-colors"
+                                                        } else {
+                                                            "inline-flex min-w-12 items-center justify-center rounded-sm px-2 text-[11px] font-medium text-muted-foreground transition-colors hover:cursor-pointer hover:text-foreground"
+                                                        }
+                                                        type="button"
+                                                        aria-pressed=move || selected().to_string()
+                                                        disabled=move || is_listing.get() || is_settings_loading.get() || any_action_in_flight()
+                                                        on:click=move |_| change_usage_source_mode(mode)
+                                                    >
+                                                        {mode.label()}
+                                                    </button>
+                                                }
+                                            })
+                                            .collect_view()
+                                        }
+                                    </div>
+                                </div>
+                                <div class="my-1 h-px bg-border"/>
+                                <label class="flex w-full cursor-pointer items-center gap-3 rounded-sm px-2 py-1.5 hover:bg-accent">
+                                    <Checkbox
+                                        checked=move || cost_usage_enabled.get()
+                                        disabled=move || is_listing.get() || is_settings_loading.get() || any_action_in_flight()
+                                        on_change=move |enabled| change_cost_usage_enabled(enabled)
+                                    />
+                                    <div>
+                                        <p class="text-sm font-medium leading-none">"Cost tracker"</p>
+                                        <p class="mt-0.5 text-[11px] text-muted-foreground">"Track local token cost"</p>
+                                    </div>
+                                </label>
+                                <label class="flex w-full cursor-pointer items-center gap-3 rounded-sm px-2 py-1.5 hover:bg-accent">
+                                    <Checkbox
+                                        checked=move || notifications_enabled.get()
+                                        disabled=move || is_settings_loading.get()
+                                        on_change=move |enabled| change_notifications_enabled(enabled)
+                                    />
+                                    <div>
+                                        <p class="text-sm font-medium leading-none">"Quota notifications"</p>
+                                        <p class="mt-0.5 text-[11px] text-muted-foreground">"System alerts for quota events"</p>
+                                    </div>
+                                </label>
+                            </div>
+                        })}
+                    </div>
                 </div>
             </div>
 
@@ -636,14 +720,25 @@ pub fn App() -> impl IntoView {
 
             {move || {
                 cost_error.get().map(|message| view! {
-                    <div class="mb-4 text-xs font-medium text-[var(--muted-foreground)]">{message}</div>
+                    <p class="mb-3 text-xs font-medium text-[var(--critical)]">{message}</p>
                 })
             }}
 
             {move || {
-                let global = global_error.get();
-                global.map(|message| view! {
-                    <div class="mb-4 text-sm font-medium text-[var(--foreground)]">{message}</div>
+                global_error.get().map(|message| view! {
+                    <Alert class="mb-4 border-[var(--warning)] bg-[var(--warning-muted)] text-[var(--warning-foreground)]">
+                        <AlertDescription class="flex items-center justify-between gap-3">
+                            <span>{message}</span>
+                            <button
+                                class="shrink-0 opacity-70 hover:opacity-100 hover:cursor-pointer"
+                                type="button"
+                                aria-label="Dismiss error"
+                                on:click=move |_| set_global_error.set(None)
+                            >
+                                <X class="size-4"/>
+                            </button>
+                        </AlertDescription>
+                    </Alert>
                 })
             }}
 
@@ -673,14 +768,22 @@ pub fn App() -> impl IntoView {
                 }
             }}
 
+            {move || snapshot_stale.get().then(|| view! {
+                <div class="mb-3">
+                    <Badge variant=BadgeVariant::Warning size=BadgeSize::Sm>
+                        "Cached snapshot"
+                    </Badge>
+                </div>
+            })}
+
             {move || {
                 let current = accounts.get();
                 if current.is_empty() {
                     if is_listing.get() {
                         view! {
                             <div class="flex flex-col items-center justify-center gap-2 py-12 text-center">
-                                <LoaderCircle class="size-4 animate-spin text-[var(--muted-foreground)]"/>
-                                <p class="text-xs font-medium text-[var(--muted-foreground)]">"Checking Codex"</p>
+                                <LoaderCircle class="size-4 animate-spin text-muted-foreground"/>
+                                <p class="text-xs font-medium text-muted-foreground">"Checking Codex"</p>
                             </div>
                         }
                         .into_any()
@@ -688,7 +791,7 @@ pub fn App() -> impl IntoView {
                         view! {
                             <div class="flex flex-col items-center justify-center gap-2 py-12 text-center">
                                 <h2 class="text-sm font-semibold leading-none">"No Codex account found"</h2>
-                                <p class="text-xs text-[var(--muted-foreground)]">
+                                <p class="text-xs text-muted-foreground">
                                     "Use the + button above to add an account, or run `codex login`."
                                 </p>
                             </div>
@@ -697,7 +800,7 @@ pub fn App() -> impl IntoView {
                     }
                 } else {
                     view! {
-                        <div class="divide-y divide-[var(--border)]">
+                        <div class="flex flex-col gap-3">
                             <For
                                 each=move || accounts.get()
                                 key=|account| account.id.clone()
@@ -785,7 +888,7 @@ pub fn App() -> impl IntoView {
                 }
             }}
 
-            <p class="mt-5 text-[11px] text-[var(--muted-foreground)]">
+            <p class="mt-5 text-[11px] text-muted-foreground">
                 {move || {
                     if any_loading.get() || is_listing.get() {
                         "Refreshing...".to_string()
@@ -821,9 +924,9 @@ fn QuotaEventCard(
         <div class=event_class title=detail_title>
             <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                    <span class="rounded-full border border-current/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                    <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="rounded-full border-current/30 uppercase tracking-wide">
                         {event_kind}
-                    </span>
+                    </Badge>
                     <strong class="text-sm font-semibold leading-5">{event.title}</strong>
                 </div>
                 <p class="mt-1 text-xs leading-5">{event.body}</p>
@@ -835,7 +938,7 @@ fn QuotaEventCard(
                 aria-label="Dismiss quota notification"
                 on:click=move |_| on_dismiss(event_id.clone())
             >
-                "x"
+                <X class="size-3.5"/>
             </button>
         </div>
     }
@@ -871,7 +974,7 @@ fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
     );
 
     view! {
-        <div class="mb-5 grid grid-cols-2 gap-3 rounded-md border border-[var(--border)] bg-[var(--secondary)] p-3 max-sm:grid-cols-1" title=title>
+        <div class="mb-5 grid grid-cols-2 gap-3 rounded-md border border-border bg-secondary p-3 max-sm:grid-cols-1" title=title>
             <CostMetric
                 label="Today"
                 tokens=usage.today_tokens
@@ -890,33 +993,12 @@ fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
 fn CostMetric(label: &'static str, tokens: i64, cost: Option<f64>) -> impl IntoView {
     view! {
         <div class="min-w-0">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{label}</p>
+            <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
             <div class="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <strong class="text-sm font-semibold leading-none">{format_cost(cost)}</strong>
-                <span class="text-xs text-[var(--muted-foreground)]">{format_tokens(tokens)}</span>
+                <span class="text-xs text-muted-foreground">{format_tokens(tokens)}</span>
             </div>
         </div>
-    }
-}
-
-#[component]
-fn Tooltip<F, S>(text: F, children: Children) -> impl IntoView
-where
-    F: Fn() -> S + Send + Sync + 'static,
-    S: Into<String> + 'static,
-{
-    let text = StoredValue::new(text);
-
-    view! {
-        <span class="group/tooltip relative inline-flex">
-            {children()}
-            <span
-                role="tooltip"
-                class="pointer-events-none absolute left-1/2 top-full z-10 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--popover)] px-2 py-1 text-xs font-medium text-[var(--popover-foreground)] opacity-0 shadow-xs transition-opacity duration-150 group-hover/tooltip:opacity-100 group-focus-within/tooltip:opacity-100"
-            >
-                {move || text.with_value(|f| f().into())}
-            </span>
-        </span>
     }
 }
 
@@ -981,81 +1063,70 @@ where
     let has_usage = move || usage.with_value(|f| f().is_some());
 
     view! {
-        <div class="py-4 first:pt-0 last:pb-0">
-            <div class="mb-3 flex items-start justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
+        <Card size=CardSize::Sm class="border-0 shadow-none">
+            <div class="flex items-start justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-baseline gap-2">
                     <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">{label_call}</h2>
-                    {move || {
-                        if is_live_system_call() {
-                            view! {
-                                <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">"System"</span>
-                            }.into_any()
-                        } else {
-                            view! { <span></span> }.into_any()
-                        }
-                    }}
+                    {move || is_live_system_call().then(|| view! {
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
+                            "System"
+                        </Badge>
+                    })}
                     {move || plan_label().map(|plan| view! {
-                        <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{plan}</span>
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
+                            {plan}
+                        </Badge>
                     })}
                     {move || usage_source().map(|source| view! {
-                        <span class="shrink-0 rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{source}</span>
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
+                            {source}
+                        </Badge>
                     })}
                 </div>
                 <div class="flex items-center gap-2 max-sm:justify-end">
-                    {move || {
-                        if can_set_system_call() {
-                            view! {
-                                <button
-                                    class="inline-flex h-8 items-center justify-center whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-xs font-medium hover:cursor-pointer hover:bg-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
-                                    type="button"
-                                    disabled=move || disabled_for_set_system.with_value(|f| f())
-                                    on:click=move |_| on_set_system.with_value(|f| f())
-                                >
-                                    "Set as System"
-                                </button>
-                            }.into_any()
-                        } else {
-                            view! { <span></span> }.into_any()
+                    {move || can_set_system_call().then(|| view! {
+                        <button
+                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("".to_string())
+                            type="button"
+                            disabled=move || disabled_for_set_system.with_value(|f| f())
+                            on:click=move |_| on_set_system.with_value(|f| f())
+                        >
+                            "Set as System"
+                        </button>
+                    })}
+                    {move || reauth_required_call().then(|| {
+                        let trigger = move |_| on_reauth.with_value(|f| f());
+                        view! {
+                            <button
+                                class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("".to_string())
+                                type="button"
+                                disabled=move || disabled_for_reauth.with_value(|f| f())
+                                on:click=trigger
+                            >
+                                "Re-auth"
+                            </button>
                         }
-                    }}
-                    {move || {
-                        if reauth_required_call() {
-                            let trigger = move |_| on_reauth.with_value(|f| f());
-                            view! {
-                                <button
-                                    class="inline-flex h-8 items-center justify-center whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-xs font-medium hover:cursor-pointer hover:bg-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
-                                    type="button"
-                                    disabled=move || disabled_for_reauth.with_value(|f| f())
-                                    on:click=trigger
-                                >
-                                    "Re-auth"
-                                </button>
-                            }.into_any()
-                        } else {
-                            view! { <span></span> }.into_any()
-                        }
-                    }}
-                    {move || {
-                        if is_managed_call() && can_remove_call() {
-                            view! {
-                                <Tooltip text=move || "Remove account".to_string()>
-                                    <button
-                                        class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-[var(--muted-foreground)] hover:cursor-pointer hover:border-[var(--border)] hover:bg-[var(--destructive,var(--accent))] hover:text-[var(--destructive-foreground,var(--foreground))] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                                        type="button"
-                                        aria-label="Remove account"
-                                        disabled=move || disabled_for_remove.with_value(|f| f())
-                                        on:click=move |_| on_remove.with_value(|f| f())
-                                    >
-                                        <Trash2 class="size-4"/>
-                                    </button>
-                                </Tooltip>
-                            }.into_any()
-                        } else {
-                            view! { <span></span> }.into_any()
-                        }
-                    }}
+                    })}
+                    {move || (is_managed_call() && can_remove_call()).then(|| view! {
+                        <Tooltip>
+                            <button
+                                class=ButtonClass { variant: ButtonVariant::Ghost, size: ButtonSize::Icon }.with_class("text-muted-foreground hover:text-destructive-foreground hover:bg-destructive".to_string())
+                                type="button"
+                                aria-label="Remove account"
+                                disabled=move || disabled_for_remove.with_value(|f| f())
+                                on:click=move |_| on_remove.with_value(|f| f())
+                            >
+                                <Trash2 class="size-4"/>
+                            </button>
+                            <TooltipContent position=TooltipPosition::Bottom>
+                                "Remove account"
+                            </TooltipContent>
+                        </Tooltip>
+                    })}
                 </div>
             </div>
+
+            <Separator/>
 
             <div class="grid gap-3">
                 {move || primary().map(|window| view! { <UsageMeter window=window/> })}
@@ -1065,14 +1136,14 @@ where
                         view! { <span></span> }.into_any()
                     } else if is_loading_call() {
                         view! {
-                            <div class="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+                            <div class="flex items-center gap-2 text-xs text-muted-foreground">
                                 <LoaderCircle class="size-3.5 animate-spin"/>
                                 <span>"Loading usage..."</span>
                             </div>
                         }.into_any()
                     } else {
                         view! {
-                            <p class="text-xs text-[var(--muted-foreground)]">
+                            <p class="text-xs text-muted-foreground">
                                 "No usage yet."
                             </p>
                         }.into_any()
@@ -1083,9 +1154,9 @@ where
             {move || credits().and_then(render_credits)}
 
             {move || error.with_value(|f| f()).map(|message| view! {
-                <p class="mt-2 text-xs font-medium text-[var(--foreground)]">{message}</p>
+                <p class="mt-2 text-xs font-medium text-[var(--critical)]">{message}</p>
             })}
-        </div>
+        </Card>
     }
 }
 
@@ -1102,12 +1173,12 @@ fn UsageMeter(window: UsageWindow) -> impl IntoView {
 
     view! {
         <div class="grid gap-1.5">
-            <div class="flex justify-between gap-3 text-xs text-[var(--foreground)]">
+            <div class="flex justify-between gap-3 text-xs text-foreground">
                 <span>{label.clone()}</span>
                 <strong>{format!("{:.0}% used", used)}</strong>
             </div>
             <div
-                class="relative h-3 w-full overflow-hidden rounded-full bg-[var(--secondary)]"
+                class="relative h-3 w-full overflow-hidden rounded-full bg-secondary"
                 role="progressbar"
                 aria-label={format!("{} usage", label)}
                 aria-valuemin="0"
@@ -1116,7 +1187,7 @@ fn UsageMeter(window: UsageWindow) -> impl IntoView {
             >
                 <div class=fill_class style=width></div>
             </div>
-            <div class="flex justify-between gap-3 text-[11px] text-[var(--muted-foreground)] max-sm:flex-col">
+            <div class="flex justify-between gap-3 text-[11px] text-muted-foreground max-sm:flex-col">
                 <span>{format!("{:.0}% remaining", window.remaining_percent.clamp(0.0, 100.0))}</span>
                 <span>{reset}</span>
             </div>
@@ -1136,7 +1207,9 @@ fn render_credits(credits: CreditsSnapshot) -> Option<impl IntoView> {
     }?;
 
     Some(view! {
-        <p class="mt-3 text-xs font-medium text-[var(--muted-foreground)]">{label}</p>
+        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm>
+            {label}
+        </Badge>
     })
 }
 
@@ -1202,7 +1275,7 @@ fn quota_event_kind_label(kind: &QuotaEventKind) -> &'static str {
 fn quota_event_class(severity: &QuotaEventSeverity) -> &'static str {
     match severity {
         QuotaEventSeverity::Info => {
-            "flex items-start gap-3 rounded-md border border-[var(--success)] bg-[var(--success-muted)] p-3 text-[var(--foreground)] shadow-xs"
+            "flex items-start gap-3 rounded-md border border-[var(--success)] bg-[var(--success-muted)] p-3 text-foreground shadow-xs"
         }
         QuotaEventSeverity::Warning => {
             "flex items-start gap-3 rounded-md border border-[var(--warning)] bg-[var(--warning-muted)] p-3 text-[var(--warning-foreground)] shadow-xs"

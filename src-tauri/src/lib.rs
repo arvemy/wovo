@@ -54,6 +54,11 @@ fn set_codex_cost_usage_enabled(enabled: bool) -> Result<CodexSettings, AppError
 }
 
 #[tauri::command]
+fn set_codex_notifications_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
+    settings::save_notifications_enabled(enabled)
+}
+
+#[tauri::command]
 async fn get_cached_codex_snapshot(
     coordinator: State<'_, Arc<CodexSnapshotCoordinator>>,
 ) -> Result<Option<CodexOverviewSnapshot>, AppError> {
@@ -177,7 +182,7 @@ impl CodexSnapshotCoordinator {
             codex::quota_events::detect_quota_events(previous.as_ref(), &snapshot);
 
         self.store_and_emit(app, snapshot.clone()).await;
-        send_quota_notifications(app, &snapshot.quota_events);
+        send_quota_notifications(app, &snapshot.quota_events, settings.notifications_enabled);
         let _ = snapshot_cache::save_snapshot(&snapshot);
         Ok(snapshot)
     }
@@ -427,8 +432,8 @@ fn oauth_error_allows_cli_fallback(error: &AppError) -> bool {
     }
 }
 
-fn send_quota_notifications(app: &AppHandle, events: &[QuotaEvent]) {
-    if events.is_empty() {
+fn send_quota_notifications(app: &AppHandle, events: &[QuotaEvent], enabled: bool) {
+    if !enabled || events.is_empty() {
         return;
     }
 
@@ -1125,6 +1130,7 @@ pub fn run() {
             refresh_codex_snapshot,
             set_system_codex_account,
             set_codex_cost_usage_enabled,
+            set_codex_notifications_enabled,
             set_codex_usage_source_mode,
             refresh_codex_usage,
             refresh_all_usage
