@@ -9,7 +9,7 @@ use crate::ui::{
     separator::Separator,
     tooltip::{Tooltip, TooltipContent, TooltipPosition},
 };
-use icons::{EllipsisVertical, LoaderCircle, Monitor, Moon, Plus, RefreshCw, Sun, Trash2, X};
+use icons::{EllipsisVertical, Info, LoaderCircle, Monitor, Moon, Plus, RefreshCw, Sun, Trash2, X};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -180,7 +180,6 @@ struct CostUsageDailyPoint {
     cached_input_tokens: i64,
     output_tokens: i64,
     total_tokens: i64,
-    cost_usd: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -192,7 +191,14 @@ struct CostUsageSnapshot {
     last_30_days_cost_usd: Option<f64>,
     daily: Vec<CostUsageDailyPoint>,
     updated_at: i64,
-    source_root: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CostUsageBreakdown {
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -632,9 +638,8 @@ pub fn App() -> impl IntoView {
         <main class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-background py-6 text-foreground max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4">
             <div class="mb-5 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-center gap-3">
-                    <img src="/public/openai-black.svg" class="size-12 shrink-0 dark:hidden" alt="OpenAI"/>
-                    <img src="/public/openai-white.svg" class="hidden size-12 shrink-0 dark:block" alt="OpenAI"/>
-                    <h1 class="text-lg font-semibold leading-none tracking-tight">"Codex"</h1>
+                    <img src="/public/openai-black.svg" class="size-12 shrink-0 dark:hidden" alt="Codex"/>
+                    <img src="/public/openai-white.svg" class="hidden size-12 shrink-0 dark:block" alt="Codex"/>
                 </div>
                 <div class="flex items-center gap-2 max-sm:justify-end">
                     <Tooltip>
@@ -1035,59 +1040,111 @@ fn QuotaEventCard(
 
 #[component]
 fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
-    let input_tokens: i64 = usage.daily.iter().map(|point| point.input_tokens).sum();
-    let cached_tokens: i64 = usage
+    let today_key = utc_day_key(usage.updated_at);
+    let today_detail = usage
         .daily
         .iter()
-        .map(|point| point.cached_input_tokens)
-        .sum();
-    let output_tokens: i64 = usage.daily.iter().map(|point| point.output_tokens).sum();
-    let daily_tokens: i64 = usage.daily.iter().map(|point| point.total_tokens).sum();
-    let priced_days = usage
-        .daily
-        .iter()
-        .filter(|point| point.cost_usd.is_some())
-        .count();
-    let last_day = usage
-        .daily
-        .last()
-        .map(|point| point.day_key.clone())
-        .unwrap_or_else(|| "no daily data".to_string());
-    let title = format!(
-        "{} · {last_day} · {} input · {} cached · {} output · {} total · {priced_days} priced days",
-        usage.source_root,
-        format_tokens(input_tokens),
-        format_tokens(cached_tokens),
-        format_tokens(output_tokens),
-        format_tokens(daily_tokens),
-    );
+        .find(|point| point.day_key == today_key)
+        .map(CostUsageBreakdown::from_daily_point)
+        .unwrap_or_else(CostUsageBreakdown::empty);
+    let last_30_days_detail = CostUsageBreakdown::from_daily_points(&usage.daily);
 
     view! {
-        <div class="mb-5 grid grid-cols-2 gap-3 rounded-md border border-border bg-secondary p-3 max-sm:grid-cols-1" title=title>
-            <CostMetric
-                label="Today"
-                tokens=usage.today_tokens
-                cost=usage.today_cost_usd
-            />
-            <CostMetric
-                label="Last 30 days"
-                tokens=usage.last_30_days_tokens
-                cost=usage.last_30_days_cost_usd
-            />
+        <div class="mb-5 flex items-start gap-2 rounded-md border border-border bg-secondary p-3">
+            <div class="grid min-w-0 flex-1 grid-cols-2 gap-3 max-sm:w-full max-sm:grid-cols-1">
+                <CostMetric
+                    label="Today"
+                    tokens=usage.today_tokens
+                    cost=usage.today_cost_usd
+                    detail=today_detail
+                />
+                <CostMetric
+                    label="Last 30 days"
+                    tokens=usage.last_30_days_tokens
+                    cost=usage.last_30_days_cost_usd
+                    detail=last_30_days_detail
+                />
+            </div>
         </div>
     }
 }
 
 #[component]
-fn CostMetric(label: &'static str, tokens: i64, cost: Option<f64>) -> impl IntoView {
+fn CostMetric(
+    label: &'static str,
+    tokens: i64,
+    cost: Option<f64>,
+    detail: CostUsageBreakdown,
+) -> impl IntoView {
+    let input_detail = format!(
+        "{} input ({} cached)",
+        format_tokens(detail.input_tokens),
+        format_tokens(detail.cached_input_tokens),
+    );
+    let output_detail = format!("{} output", format_tokens(detail.output_tokens));
+    let total_detail = format!("{} total", format_tokens(detail.total_tokens));
+    let tooltip_label = format!("{label} pricing details");
+
     view! {
         <div class="min-w-0">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+            <div class="flex items-center gap-1.5">
+                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+                <Tooltip>
+                    <button
+                        class="inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:cursor-pointer hover:bg-accent hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                        type="button"
+                        aria-label=tooltip_label
+                    >
+                        <Info class="size-3"/>
+                    </button>
+                    <TooltipContent
+                        class="w-52 whitespace-normal text-left leading-5"
+                        position=TooltipPosition::Bottom
+                    >
+                        <div class="grid gap-1">
+                            <p class="font-medium">"Pricing details"</p>
+                            <p>{input_detail}</p>
+                            <p>{output_detail}</p>
+                            <p>{total_detail}</p>
+                        </div>
+                    </TooltipContent>
+                </Tooltip>
+            </div>
             <div class="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <strong class="text-sm font-semibold leading-none">{format_cost(cost)}</strong>
                 <span class="text-xs text-muted-foreground">{format_tokens(tokens)}</span>
             </div>
         </div>
+    }
+}
+
+impl CostUsageBreakdown {
+    fn empty() -> Self {
+        Self {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+        }
+    }
+
+    fn from_daily_point(point: &CostUsageDailyPoint) -> Self {
+        Self {
+            input_tokens: point.input_tokens,
+            cached_input_tokens: point.cached_input_tokens,
+            output_tokens: point.output_tokens,
+            total_tokens: point.total_tokens,
+        }
+    }
+
+    fn from_daily_points(points: &[CostUsageDailyPoint]) -> Self {
+        points.iter().fold(Self::empty(), |mut total, point| {
+            total.input_tokens += point.input_tokens;
+            total.cached_input_tokens += point.cached_input_tokens;
+            total.output_tokens += point.output_tokens;
+            total.total_tokens += point.total_tokens;
+            total
+        })
     }
 }
 
@@ -1433,6 +1490,16 @@ fn format_tokens(value: i64) -> String {
     } else {
         format!("{value} tokens")
     }
+}
+
+fn utc_day_key(value: i64) -> String {
+    let date = js_sys::Date::new(&JsValue::from_f64(value as f64 * 1000.0));
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.get_utc_full_year(),
+        date.get_utc_month() + 1,
+        date.get_utc_date()
+    )
 }
 
 fn format_time_ago(value: i64) -> String {
