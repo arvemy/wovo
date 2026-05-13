@@ -98,11 +98,15 @@ pub async fn fetch_cli_usage(
         AppError::UsageFetch(format!("failed to decode Codex CLI account: {error}"))
     })?;
 
-    if account.requires_openai_auth || account.account.is_none() {
+    if cli_account_requires_login(&account) {
         return Err(AppError::AuthNotFound);
     }
 
     normalize_cli_usage(account_id, rate_limits, account)
+}
+
+fn cli_account_requires_login(account: &CliAccountResponse) -> bool {
+    account.account.is_none()
 }
 
 async fn run_app_server(codex_home: &Path) -> Result<HashMap<i64, Value>, AppError> {
@@ -414,7 +418,8 @@ struct CliCreditsSnapshot {
 #[serde(rename_all = "camelCase")]
 struct CliAccountResponse {
     account: Option<CliAccount>,
-    requires_openai_auth: bool,
+    #[serde(rename = "requiresOpenaiAuth")]
+    _requires_openai_auth: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -657,5 +662,31 @@ mod tests {
         let error = response_result(&responses, 2).unwrap_err();
 
         assert!(matches!(error, AppError::AuthNotFound));
+    }
+
+    #[test]
+    fn accepts_cli_account_when_account_is_present_even_if_openai_auth_is_required() {
+        let account: CliAccountResponse = serde_json::from_str(
+            r#"{
+                "account": {"type": "chatgpt", "email": "user@example.com", "planType": "plus"},
+                "requiresOpenaiAuth": true
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!cli_account_requires_login(&account));
+    }
+
+    #[test]
+    fn requires_login_when_cli_account_is_missing() {
+        let account: CliAccountResponse = serde_json::from_str(
+            r#"{
+                "account": null,
+                "requiresOpenaiAuth": true
+            }"#,
+        )
+        .unwrap();
+
+        assert!(cli_account_requires_login(&account));
     }
 }
