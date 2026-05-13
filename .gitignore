@@ -19,6 +19,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Local developer tools
+/bin/act
+
 # Local environment files
 .env
 .env.*

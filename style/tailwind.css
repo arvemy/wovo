@@ -130,6 +130,13 @@ body {
   scrollbar-gutter: stable;
 }
 
+.is-window-resizing *,
+.is-window-resizing *::before,
+.is-window-resizing *::after {
+  transition-duration: 0ms !important;
+  animation-duration: 0ms !important;
+}
+
 @media (max-height: 680px), (max-width: 760px) {
   .app-shell {
     gap: 0.5rem;

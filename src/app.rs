@@ -5,8 +5,8 @@ use crate::codex_api::{
     AccountSourceKind, AccountSummary, CodexOverviewSnapshot, CodexSettings, CodexUsageSourceMode,
     CommandError, CostUsageSnapshot, CreditsSnapshot, QuotaEvent,
     SetAutoAccountSwitchingEnabledArgs, SetAutoSwitchThresholdArgs, SetCostUsageEnabledArgs,
-    SetHideAccountCredentialsArgs, SetNotificationsEnabledArgs, SetUsageSourceModeArgs,
-    SetWeeklyPenaltyThresholdArgs, UsageSnapshot, UsageWindow,
+    SetHideAccountCredentialsArgs, SetLaunchOnLoginArgs, SetNotificationsEnabledArgs,
+    SetUsageSourceModeArgs, SetWeeklyPenaltyThresholdArgs, UsageSnapshot, UsageWindow,
 };
 use crate::cost_usage_view::CostUsageBreakdown;
 use crate::formatting::{
@@ -65,6 +65,8 @@ struct AutoSwitchRunwayEstimate {
 
 #[component]
 pub fn App() -> impl IntoView {
+    install_resize_transition_guard();
+
     let initial_theme_mode = current_theme_preference();
     let (active_provider, set_active_provider) = signal(ProviderPage::Codex);
     let (accounts, set_accounts) = signal::<Vec<AccountSummary>>(Vec::new());
@@ -83,6 +85,7 @@ pub fn App() -> impl IntoView {
     let (hide_account_credentials, set_hide_account_credentials) = signal(true);
     let (auto_switch_threshold, set_auto_switch_threshold) = signal::<f64>(90.0);
     let (weekly_penalty_threshold, set_weekly_penalty_threshold) = signal::<f64>(20.0);
+    let (launch_on_login, set_launch_on_login) = signal(false);
     let (revealed_credential, set_revealed_credential) = signal::<Option<String>>(None);
     let (is_menu_open, set_is_menu_open) = signal(false);
     let (cost_usage, set_cost_usage) = signal::<Option<CostUsageSnapshot>>(None);
@@ -102,6 +105,7 @@ pub fn App() -> impl IntoView {
         set_hide_account_credentials.set(settings.hide_account_credentials);
         set_auto_switch_threshold.set(settings.auto_switch_threshold_percent);
         set_weekly_penalty_threshold.set(settings.weekly_penalty_threshold);
+        set_launch_on_login.set(settings.launch_on_login);
     };
 
     let apply_snapshot = move |snapshot: CodexOverviewSnapshot| {
@@ -476,6 +480,36 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let change_launch_on_login = move |enabled: bool| {
+        if enabled == launch_on_login.get_untracked() {
+            return;
+        }
+        let previous = launch_on_login.get_untracked();
+        set_launch_on_login.set(enabled);
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args = serde_wasm_bindgen::to_value(&SetLaunchOnLoginArgs { enabled })
+                .map_err(|error| CommandError::from_message(error.to_string()));
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>("set_codex_launch_on_login", args).await {
+                        Ok(settings) => apply_settings(settings),
+                        Err(error) => {
+                            set_launch_on_login.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_launch_on_login.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
     let listen_for_snapshots = move || {
         let handler = Closure::<dyn FnMut(JsValue)>::new(move |event| {
             let payload = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
@@ -495,9 +529,32 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let listen_for_settings = move || {
+        let handler = Closure::<dyn FnMut(JsValue)>::new(move |event| {
+            let payload = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+                .unwrap_or(JsValue::UNDEFINED);
+            if let Ok(settings) = serde_wasm_bindgen::from_value::<CodexSettings>(payload) {
+                let hides_credentials =
+                    settings.hide_account_credentials && !hide_account_credentials.get_untracked();
+                apply_settings(settings);
+                if hides_credentials {
+                    set_revealed_credential.set(None);
+                }
+            }
+        });
+        let function = handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        spawn_local(async move {
+            match listen_tauri("codex:settings-updated", &function).await {
+                Ok(_) => handler.forget(),
+                Err(error) => set_global_error.set(Some(js_command_error(&error).message)),
+            }
+        });
+    };
+
     load_settings();
     load_cached_snapshot();
     listen_for_snapshots();
+    listen_for_settings();
     refresh_overview_snapshot(false);
 
     let refresh_all = move |_| refresh_overview_snapshot(true);
@@ -646,7 +703,7 @@ pub fn App() -> impl IntoView {
                             enabled=move || auto_account_switching_enabled.get()
                             disabled=move || is_settings_loading.get() || any_action_in_flight()
                             estimate=move || auto_switch_runway.get()
-                            on_change=Box::new(move |enabled| change_auto_account_switching_enabled(enabled))
+                            on_change=Box::new(change_auto_account_switching_enabled)
                         />
                     <Tooltip>
                         <button
@@ -820,6 +877,17 @@ pub fn App() -> impl IntoView {
                                     <div>
                                         <p class="text-sm font-medium leading-none">"Hide credentials"</p>
                                         <p class="mt-0.5 text-[11px] text-muted-foreground">"Blur account labels"</p>
+                                    </div>
+                                </label>
+                                <label class="flex w-full cursor-pointer items-center gap-3 rounded-sm px-2 py-1.5 hover:bg-accent">
+                                    <Checkbox
+                                        checked=move || launch_on_login.get()
+                                        disabled=move || is_settings_loading.get()
+                                        on_change=move |enabled| change_launch_on_login(enabled)
+                                    />
+                                    <div>
+                                        <p class="text-sm font-medium leading-none">"Launch at login"</p>
+                                        <p class="mt-0.5 text-[11px] text-muted-foreground">"Start minimized to tray"</p>
                                     </div>
                                 </label>
                                 {move || auto_account_switching_enabled.get().then(|| view! {
@@ -1111,6 +1179,28 @@ pub fn App() -> impl IntoView {
             </div>
         </div>
     }
+}
+
+fn install_resize_transition_guard() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let handler = js_sys::Function::new_no_args(
+        r#"
+        document.documentElement.classList.add('is-window-resizing');
+        clearTimeout(window.__wovoResizeTransitionTimer);
+        window.__wovoResizeTransitionTimer = setTimeout(() => {
+            document.documentElement.classList.remove('is-window-resizing');
+        }, 120);
+        "#,
+    );
+    let callback = handler.unchecked_ref::<js_sys::Function>();
+    let _ = window.add_event_listener_with_callback("resize", callback);
+    let _ = js_sys::Reflect::set(
+        window.as_ref(),
+        &JsValue::from_str("__wovoResizeTransitionGuard"),
+        handler.as_ref(),
+    );
 }
 
 #[component]

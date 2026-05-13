@@ -39,6 +39,8 @@ pub enum AppError {
     UsageFetch(String),
     #[error("Codex usage response was not usable.")]
     InvalidUsageResponse,
+    #[error("Launch-on-login registration failed: {0}")]
+    LaunchOnLogin(String),
 }
 
 impl AppError {
@@ -62,6 +64,7 @@ impl AppError {
             Self::TokenRefresh(_) => "token_refresh",
             Self::UsageFetch(_) => "usage_fetch",
             Self::InvalidUsageResponse => "invalid_usage_response",
+            Self::LaunchOnLogin(_) => "launch_on_login",
         }
     }
 }

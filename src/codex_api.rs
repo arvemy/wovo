@@ -103,6 +103,8 @@ pub(crate) struct CodexSettings {
     pub(crate) auto_switch_threshold_percent: f64,
     #[serde(default = "default_weekly_penalty_threshold")]
     pub(crate) weekly_penalty_threshold: f64,
+    #[serde(default)]
+    pub(crate) launch_on_login: bool,
 }
 
 fn default_auto_switch_threshold() -> f64 {
@@ -153,6 +155,12 @@ pub(crate) struct SetAutoSwitchThresholdArgs {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetWeeklyPenaltyThresholdArgs {
     pub(crate) value: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetLaunchOnLoginArgs {
+    pub(crate) enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

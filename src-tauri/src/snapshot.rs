@@ -58,7 +58,7 @@ impl CodexSnapshotCoordinator {
         snapshot
     }
 
-    async fn refresh_manual(
+    pub(crate) async fn refresh_manual(
         &self,
         app: AppHandle,
         force: bool,

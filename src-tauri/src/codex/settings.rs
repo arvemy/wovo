@@ -27,6 +27,7 @@ pub struct CodexSettings {
     pub hide_account_credentials: bool,
     pub auto_switch_threshold_percent: f64,
     pub weekly_penalty_threshold: f64,
+    pub launch_on_login: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +47,8 @@ struct StoredCodexSettings {
     auto_switch_threshold_percent: Option<f64>,
     #[serde(default)]
     weekly_penalty_threshold: Option<f64>,
+    #[serde(default)]
+    launch_on_login: Option<bool>,
 }
 
 impl Default for CodexSettings {
@@ -58,6 +61,7 @@ impl Default for CodexSettings {
             hide_account_credentials: false,
             auto_switch_threshold_percent: 90.0,
             weekly_penalty_threshold: 20.0,
+            launch_on_login: false,
         }
     }
 }
@@ -123,6 +127,13 @@ pub fn save_weekly_penalty_threshold(value: f64) -> Result<CodexSettings, AppErr
     Ok(settings)
 }
 
+pub fn save_launch_on_login(enabled: bool) -> Result<CodexSettings, AppError> {
+    let mut settings = load_settings()?;
+    settings.launch_on_login = enabled;
+    save_settings_to_path(&settings_path(), &settings)?;
+    Ok(settings)
+}
+
 fn settings_path() -> PathBuf {
     default_wovo_codex_root().join(SETTINGS_FILE_NAME)
 }
@@ -166,6 +177,7 @@ fn load_settings_from_path_with_codex_home(
             0.0,
             50.0,
         ),
+        launch_on_login: stored.launch_on_login.unwrap_or(false),
     })
 }
 
@@ -239,6 +251,7 @@ mod tests {
             hide_account_credentials: true,
             auto_switch_threshold_percent: 80.0,
             weekly_penalty_threshold: 15.0,
+            launch_on_login: false,
         };
 
         save_settings_to_path(&path, &settings).unwrap();

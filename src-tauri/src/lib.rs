@@ -7,6 +7,7 @@ mod error;
 mod notifications;
 mod settings_commands;
 mod snapshot;
+mod tray;
 mod usage_commands;
 
 pub fn run() {
