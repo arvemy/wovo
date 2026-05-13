@@ -4,24 +4,26 @@
   "version": "0.1.0",
   "identifier": "com.wovo.desktop",
   "build": {
-    "beforeDevCommand": "trunk serve",
+    "beforeDevCommand": "node ./scripts/trunk.mjs serve",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "trunk build",
+    "beforeBuildCommand": "node ./scripts/trunk.mjs build",
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
-        "title": "wovo",
-        "width": 900,
-        "height": 720,
+        "title": "WoVo",
+        "width": 960,
+        "height": 900,
         "minWidth": 640,
         "minHeight": 520
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 http://127.0.0.1:1420 ws://127.0.0.1:1420; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "freezePrototype": true
     }
   },
   "bundle": {

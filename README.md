@@ -1,7 +1,41 @@
-# Tauri + Leptos
+# WoVo
 
-This template should help get you started developing with Tauri and Leptos.
+WoVo is a Tauri 2 desktop app for tracking Codex account usage. It shows quota windows, cost usage, account health, notifications, and account switching controls from a Leptos/WASM frontend backed by a Rust Tauri service.
 
-## Recommended IDE Setup
+## Development
 
-[VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+Install dependencies:
+
+```sh
+pnpm install
+```
+
+Start the desktop app in development mode:
+
+```sh
+pnpm run tauri:dev
+```
+
+Build CSS after changing Tailwind classes:
+
+```sh
+pnpm run build:css
+```
+
+Run Rust checks:
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
+
+Build release bundles:
+
+```sh
+pnpm run tauri:build
+```
+
+## License
+
+WoVo is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
+#[wasm_bindgen(module = "/src/tauri_bridge.js")]
 extern "C" {
-    #[wasm_bindgen(catch, js_namespace = ["window", "__TAURI__", "core"])]
+    #[wasm_bindgen(catch)]
     async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
-    #[wasm_bindgen(catch, js_namespace = ["window", "__TAURI__", "event"])]
+    #[wasm_bindgen(catch)]
     async fn listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
 }
 
