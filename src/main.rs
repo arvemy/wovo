@@ -1,4 +1,8 @@
 mod app;
+mod codex_api;
+mod cost_usage_view;
+mod formatting;
+mod theme;
 mod ui;
 
 use app::*;
