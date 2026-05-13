@@ -4,12 +4,17 @@ use icons::{LoaderCircle, Plus, RefreshCw, Trash2};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["window", "__TAURI__", "core"])]
     async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["window", "__TAURI__", "event"])]
+    async fn listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -63,12 +68,54 @@ impl CodexUsageSourceMode {
 #[serde(rename_all = "camelCase")]
 struct CodexSettings {
     usage_source_mode: CodexUsageSourceMode,
+    cost_usage_enabled: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetUsageSourceModeArgs {
     usage_source_mode: CodexUsageSourceMode,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCostUsageEnabledArgs {
+    enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CostUsageDailyPoint {
+    day_key: String,
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+    cost_usd: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CostUsageSnapshot {
+    today_tokens: i64,
+    today_cost_usd: Option<f64>,
+    last_30_days_tokens: i64,
+    last_30_days_cost_usd: Option<f64>,
+    daily: Vec<CostUsageDailyPoint>,
+    updated_at: i64,
+    source_root: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexOverviewSnapshot {
+    accounts: Vec<AccountSummary>,
+    usage_by_account_id: HashMap<String, UsageSnapshot>,
+    errors_by_account_id: HashMap<String, String>,
+    cost_usage: Option<CostUsageSnapshot>,
+    cost_error: Option<String>,
+    generated_at: i64,
+    stale: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -90,8 +137,8 @@ struct CreditsSnapshot {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RefreshArgs<'a> {
-    account_id: &'a str,
+struct RefreshSnapshotArgs {
+    force: bool,
 }
 
 #[derive(Serialize)]
@@ -102,25 +149,7 @@ struct AccountActionArgs<'a> {
 
 #[derive(Clone, Debug)]
 struct CommandError {
-    code: Option<String>,
     message: String,
-}
-
-impl CommandError {
-    fn is_auth_failure(&self) -> bool {
-        matches!(
-            self.code.as_deref(),
-            Some("auth_not_found" | "missing_tokens")
-        ) || {
-            let message = self.message.to_ascii_lowercase();
-            message.contains("401")
-                || message.contains("403")
-                || message.contains("unauthorized")
-                || message.contains("invalid_grant")
-                || message.contains("auth.json was not found")
-                || message.contains("does not contain oauth tokens")
-        }
-    }
 }
 
 #[component]
@@ -131,92 +160,76 @@ pub fn App() -> impl IntoView {
     let (loading_ids, set_loading_ids) = signal::<HashSet<String>>(HashSet::new());
     let (reauth_ids, set_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
     let (usage_source_mode, set_usage_source_mode) = signal(CodexUsageSourceMode::Auto);
+    let (cost_usage_enabled, set_cost_usage_enabled) = signal(false);
+    let (cost_usage, set_cost_usage) = signal::<Option<CostUsageSnapshot>>(None);
+    let (cost_error, set_cost_error) = signal::<Option<String>>(None);
+    let (snapshot_generated_at, set_snapshot_generated_at) = signal::<Option<i64>>(None);
+    let (snapshot_stale, set_snapshot_stale) = signal(false);
     let (is_settings_loading, set_is_settings_loading) = signal(true);
     let (is_listing, set_is_listing) = signal(true);
     let (is_account_action_loading, set_is_account_action_loading) = signal(false);
     let (global_error, set_global_error) = signal::<Option<String>>(None);
 
-    let mark_loading = move |id: String, loading: bool| {
-        set_loading_ids.update(|set| {
-            if loading {
-                set.insert(id);
-            } else {
-                set.remove(&id);
-            }
-        });
+    let apply_snapshot = move |snapshot: CodexOverviewSnapshot| {
+        let next_ids: HashSet<String> = snapshot
+            .accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect();
+        let reauth_ids: HashSet<String> = snapshot
+            .errors_by_account_id
+            .iter()
+            .filter(|(_, message)| is_auth_failure_message(message))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        set_accounts.set(snapshot.accounts);
+        set_usage_by_id.set(snapshot.usage_by_account_id);
+        set_errors_by_id.set(snapshot.errors_by_account_id);
+        set_loading_ids.update(|set| set.retain(|id| next_ids.contains(id)));
+        set_reauth_ids.set(reauth_ids);
+        set_cost_usage.set(snapshot.cost_usage);
+        set_cost_error.set(snapshot.cost_error);
+        set_snapshot_generated_at.set(Some(snapshot.generated_at));
+        set_snapshot_stale.set(snapshot.stale);
     };
 
-    let refresh_account_usage = move |account_id: String| {
-        let id_for_clear = account_id.clone();
-        set_errors_by_id.update(|map| {
-            map.remove(&id_for_clear);
-        });
-        mark_loading(account_id.clone(), true);
-
-        spawn_local(async move {
-            match refresh_usage(&account_id).await {
-                Ok(snapshot) => {
-                    let id = account_id.clone();
-                    set_reauth_ids.update(|set| {
-                        set.remove(&id);
-                    });
-                    set_usage_by_id.update(|map| {
-                        map.insert(account_id.clone(), snapshot);
-                    });
-                }
-                Err(error) => {
-                    let id = account_id.clone();
-                    if error.is_auth_failure() {
-                        set_reauth_ids.update(|set| {
-                            set.insert(id.clone());
-                        });
-                    }
-                    set_usage_by_id.update(|map| {
-                        map.remove(&id);
-                    });
-                    set_errors_by_id.update(|map| {
-                        map.insert(id, error.message);
-                    });
-                }
-            }
-            mark_loading(account_id, false);
-        });
-    };
-
-    let load_accounts_and_usage = move || {
+    let refresh_overview_snapshot = move |force: bool| {
         spawn_local(async move {
             set_is_listing.set(true);
             set_global_error.set(None);
+            set_loading_ids.set(
+                accounts
+                    .get_untracked()
+                    .into_iter()
+                    .map(|account| account.id)
+                    .collect(),
+            );
 
-            match invoke_tauri::<Vec<AccountSummary>>("list_codex_accounts", JsValue::UNDEFINED)
-                .await
-            {
-                Ok(next_accounts) => {
-                    let next_ids: HashSet<String> = next_accounts
-                        .iter()
-                        .map(|account| account.id.clone())
-                        .collect();
-                    set_accounts.set(next_accounts.clone());
-                    set_usage_by_id.update(|map| map.retain(|id, _| next_ids.contains(id)));
-                    set_errors_by_id.update(|map| map.retain(|id, _| next_ids.contains(id)));
-                    set_loading_ids.update(|set| set.retain(|id| next_ids.contains(id)));
-                    set_reauth_ids.update(|set| set.retain(|id| next_ids.contains(id)));
-
-                    for account in next_accounts {
-                        refresh_account_usage(account.id);
-                    }
-                }
+            match refresh_snapshot(force).await {
+                Ok(snapshot) => apply_snapshot(snapshot),
                 Err(error) => {
-                    set_accounts.set(Vec::new());
-                    set_usage_by_id.set(HashMap::new());
-                    set_errors_by_id.set(HashMap::new());
-                    set_loading_ids.set(HashSet::new());
-                    set_reauth_ids.set(HashSet::new());
                     set_global_error.set(Some(error.message));
                 }
             }
 
+            set_loading_ids.set(HashSet::new());
             set_is_listing.set(false);
+        });
+    };
+
+    let load_cached_snapshot = move || {
+        spawn_local(async move {
+            match invoke_tauri::<Option<CodexOverviewSnapshot>>(
+                "get_cached_codex_snapshot",
+                JsValue::UNDEFINED,
+            )
+            .await
+            {
+                Ok(Some(snapshot)) => apply_snapshot(snapshot),
+                Ok(None) => {}
+                Err(error) => set_global_error.set(Some(error.message)),
+            }
         });
     };
 
@@ -224,7 +237,10 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             set_is_settings_loading.set(true);
             match invoke_tauri::<CodexSettings>("get_codex_settings", JsValue::UNDEFINED).await {
-                Ok(settings) => set_usage_source_mode.set(settings.usage_source_mode),
+                Ok(settings) => {
+                    set_usage_source_mode.set(settings.usage_source_mode);
+                    set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                }
                 Err(error) => set_global_error.set(Some(error.message)),
             }
             set_is_settings_loading.set(false);
@@ -250,7 +266,8 @@ pub fn App() -> impl IntoView {
                     match invoke_tauri::<CodexSettings>("set_codex_usage_source_mode", args).await {
                         Ok(settings) => {
                             set_usage_source_mode.set(settings.usage_source_mode);
-                            load_accounts_and_usage();
+                            set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                            refresh_overview_snapshot(true);
                         }
                         Err(error) => {
                             set_usage_source_mode.set(previous);
@@ -267,19 +284,72 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    load_settings();
-    load_accounts_and_usage();
-
-    let refresh_all = move |_| {
-        let current = accounts.get_untracked();
-        if current.is_empty() {
-            load_accounts_and_usage();
+    let change_cost_usage_enabled = move |enabled: bool| {
+        if enabled == cost_usage_enabled.get_untracked() {
             return;
         }
-        for account in current {
-            refresh_account_usage(account.id);
+        let previous = cost_usage_enabled.get_untracked();
+        set_cost_usage_enabled.set(enabled);
+        if !enabled {
+            set_cost_usage.set(None);
+            set_cost_error.set(None);
         }
+
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args = serde_wasm_bindgen::to_value(&SetCostUsageEnabledArgs { enabled })
+                .map_err(|error| CommandError::from_message(error.to_string()));
+
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>("set_codex_cost_usage_enabled", args).await
+                    {
+                        Ok(settings) => {
+                            set_usage_source_mode.set(settings.usage_source_mode);
+                            set_cost_usage_enabled.set(settings.cost_usage_enabled);
+                            refresh_overview_snapshot(true);
+                        }
+                        Err(error) => {
+                            set_cost_usage_enabled.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_cost_usage_enabled.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
     };
+
+    let listen_for_snapshots = move || {
+        let handler = Closure::<dyn FnMut(JsValue)>::new(move |event| {
+            let payload = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+                .unwrap_or(JsValue::UNDEFINED);
+            if let Ok(snapshot) = serde_wasm_bindgen::from_value::<CodexOverviewSnapshot>(payload) {
+                apply_snapshot(snapshot);
+                set_loading_ids.set(HashSet::new());
+                set_is_listing.set(false);
+            }
+        });
+        let function = handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        spawn_local(async move {
+            match listen("codex:snapshot-updated", &function).await {
+                Ok(_) => handler.forget(),
+                Err(error) => set_global_error.set(Some(js_command_error(&error).message)),
+            }
+        });
+    };
+
+    load_settings();
+    load_cached_snapshot();
+    listen_for_snapshots();
+    refresh_overview_snapshot(false);
+
+    let refresh_all = move |_| refresh_overview_snapshot(true);
 
     let add_account = move || {
         spawn_local(async move {
@@ -287,7 +357,7 @@ pub fn App() -> impl IntoView {
             set_global_error.set(None);
 
             match invoke_tauri::<AccountSummary>("add_codex_account", JsValue::UNDEFINED).await {
-                Ok(_) => load_accounts_and_usage(),
+                Ok(_) => refresh_overview_snapshot(true),
                 Err(error) => set_global_error.set(Some(error.message)),
             }
 
@@ -317,7 +387,7 @@ pub fn App() -> impl IntoView {
                     set_reauth_ids.update(|set| {
                         set.remove(&account.id);
                     });
-                    load_accounts_and_usage();
+                    refresh_overview_snapshot(true);
                 }
                 Err(error) => set_global_error.set(Some(error.message)),
             }
@@ -345,7 +415,7 @@ pub fn App() -> impl IntoView {
                     set_reauth_ids.update(|set| {
                         set.remove(&account_id);
                     });
-                    load_accounts_and_usage();
+                    refresh_overview_snapshot(true);
                 }
                 Err(error) => set_global_error.set(Some(error.message)),
             }
@@ -360,7 +430,7 @@ pub fn App() -> impl IntoView {
             set_global_error.set(None);
 
             match account_action::<AccountSummary>("set_system_codex_account", &account_id).await {
-                Ok(_) => load_accounts_and_usage(),
+                Ok(_) => refresh_overview_snapshot(true),
                 Err(error) => set_global_error.set(Some(error.message)),
             }
 
@@ -370,8 +440,18 @@ pub fn App() -> impl IntoView {
 
     let any_action_in_flight = move || is_account_action_loading.get();
     let any_loading = Memo::new(move |_| !loading_ids.get().is_empty());
-    let latest_updated_at =
-        Memo::new(move |_| usage_by_id.with(|map| map.values().map(|s| s.updated_at).max()));
+    let latest_updated_at = Memo::new(move |_| {
+        let usage_updated_at = usage_by_id.with(|map| map.values().map(|s| s.updated_at).max());
+        let cost_updated_at = cost_usage.with(|usage| usage.as_ref().map(|usage| usage.updated_at));
+        [
+            usage_updated_at,
+            cost_updated_at,
+            snapshot_generated_at.get(),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    });
 
     view! {
         <main class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-[var(--background)] py-6 text-[var(--foreground)] max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4">
@@ -421,6 +501,18 @@ pub fn App() -> impl IntoView {
                                 .collect_view()
                         }}
                     </div>
+                    <Tooltip text=move || "Track local token cost".to_string()>
+                        <label class="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 text-[11px] font-semibold text-[var(--foreground)] hover:cursor-pointer">
+                            <input
+                                class="h-3.5 w-3.5 accent-[var(--foreground)]"
+                                type="checkbox"
+                                prop:checked=move || cost_usage_enabled.get()
+                                disabled=move || is_listing.get() || is_settings_loading.get() || any_action_in_flight()
+                                on:change=move |event| change_cost_usage_enabled(event_target_checked(&event))
+                            />
+                            <span>"Cost"</span>
+                        </label>
+                    </Tooltip>
                     <Tooltip text=move || {
                         if is_account_action_loading.get() {
                             "Cancel login".to_string()
@@ -473,6 +565,18 @@ pub fn App() -> impl IntoView {
                     </Tooltip>
                 </div>
             </div>
+
+            {move || {
+                cost_usage.get().map(|usage| view! {
+                    <CostSummary usage=usage/>
+                })
+            }}
+
+            {move || {
+                cost_error.get().map(|message| view! {
+                    <div class="mb-4 text-xs font-medium text-[var(--muted-foreground)]">{message}</div>
+                })
+            }}
 
             {move || {
                 let global = global_error.get();
@@ -597,6 +701,8 @@ pub fn App() -> impl IntoView {
                 {move || {
                     if any_loading.get() || is_listing.get() {
                         "Refreshing...".to_string()
+                    } else if snapshot_stale.get() {
+                        "Cached data".to_string()
                     } else {
                         match latest_updated_at.get() {
                             Some(ts) => format!("Last refreshed {}", format_time_ago(ts)),
@@ -606,6 +712,64 @@ pub fn App() -> impl IntoView {
                 }}
             </p>
         </main>
+    }
+}
+
+#[component]
+fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
+    let input_tokens: i64 = usage.daily.iter().map(|point| point.input_tokens).sum();
+    let cached_tokens: i64 = usage
+        .daily
+        .iter()
+        .map(|point| point.cached_input_tokens)
+        .sum();
+    let output_tokens: i64 = usage.daily.iter().map(|point| point.output_tokens).sum();
+    let daily_tokens: i64 = usage.daily.iter().map(|point| point.total_tokens).sum();
+    let priced_days = usage
+        .daily
+        .iter()
+        .filter(|point| point.cost_usd.is_some())
+        .count();
+    let last_day = usage
+        .daily
+        .last()
+        .map(|point| point.day_key.clone())
+        .unwrap_or_else(|| "no daily data".to_string());
+    let title = format!(
+        "{} · {last_day} · {} input · {} cached · {} output · {} total · {priced_days} priced days",
+        usage.source_root,
+        format_tokens(input_tokens),
+        format_tokens(cached_tokens),
+        format_tokens(output_tokens),
+        format_tokens(daily_tokens),
+    );
+
+    view! {
+        <div class="mb-5 grid grid-cols-2 gap-3 rounded-md border border-[var(--border)] bg-[var(--secondary)] p-3 max-sm:grid-cols-1" title=title>
+            <CostMetric
+                label="Today"
+                tokens=usage.today_tokens
+                cost=usage.today_cost_usd
+            />
+            <CostMetric
+                label="Last 30 days"
+                tokens=usage.last_30_days_tokens
+                cost=usage.last_30_days_cost_usd
+            />
+        </div>
+    }
+}
+
+#[component]
+fn CostMetric(label: &'static str, tokens: i64, cost: Option<f64>) -> impl IntoView {
+    view! {
+        <div class="min-w-0">
+            <p class="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{label}</p>
+            <div class="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <strong class="text-sm font-semibold leading-none">{format_cost(cost)}</strong>
+                <span class="text-xs text-[var(--muted-foreground)]">{format_tokens(tokens)}</span>
+            </div>
+        </div>
     }
 }
 
@@ -849,10 +1013,10 @@ fn render_credits(credits: CreditsSnapshot) -> Option<impl IntoView> {
     })
 }
 
-async fn refresh_usage(account_id: &str) -> Result<UsageSnapshot, CommandError> {
-    let args = serde_wasm_bindgen::to_value(&RefreshArgs { account_id })
+async fn refresh_snapshot(force: bool) -> Result<CodexOverviewSnapshot, CommandError> {
+    let args = serde_wasm_bindgen::to_value(&RefreshSnapshotArgs { force })
         .map_err(|error| CommandError::from_message(error.to_string()))?;
-    invoke_tauri("refresh_codex_usage", args).await
+    invoke_tauri("refresh_codex_snapshot", args).await
 }
 
 async fn account_action<T>(cmd: &str, account_id: &str) -> Result<T, CommandError>
@@ -876,24 +1040,47 @@ where
 }
 
 fn js_command_error(value: &JsValue) -> CommandError {
-    let code = js_sys::Reflect::get(value, &JsValue::from_str("code"))
-        .ok()
-        .and_then(|value| value.as_string());
     let message = js_sys::Reflect::get(value, &JsValue::from_str("message"))
         .ok()
         .and_then(|value| value.as_string())
         .or_else(|| value.as_string())
         .unwrap_or_else(|| "Wovo could not complete the request.".to_string());
 
-    CommandError { code, message }
+    CommandError { message }
 }
 
 impl CommandError {
     fn from_message(message: String) -> Self {
-        Self {
-            code: None,
-            message,
-        }
+        Self { message }
+    }
+}
+
+fn is_auth_failure_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("401")
+        || message.contains("403")
+        || message.contains("unauthorized")
+        || message.contains("invalid_grant")
+        || message.contains("auth.json was not found")
+        || message.contains("does not contain oauth tokens")
+}
+
+fn format_cost(value: Option<f64>) -> String {
+    match value {
+        Some(cost) if cost < 0.005 && cost > 0.0 => format!("${cost:.4}"),
+        Some(cost) => format!("${cost:.2}"),
+        None => "Unpriced".to_string(),
+    }
+}
+
+fn format_tokens(value: i64) -> String {
+    let value = value.max(0);
+    if value >= 1_000_000 {
+        format!("{:.1}M tokens", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K tokens", value as f64 / 1_000.0)
+    } else {
+        format!("{value} tokens")
     }
 }
 
