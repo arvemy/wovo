@@ -7,7 +7,7 @@ use codex::account_store::{
 };
 use codex::auth_store::{
     detected_ambient_account, load_ambient_credentials, load_credentials_from_home,
-    save_credentials, CodexOAuthCredentials,
+    replace_auth_json_from_home, save_credentials, system_codex_home_path, CodexOAuthCredentials,
 };
 use codex::login_runner::{self, LoginRunnerState};
 use codex::token_refresh;
@@ -15,7 +15,7 @@ use codex::usage_fetcher;
 use domain::account::AccountSummary;
 use domain::usage::UsageSnapshot;
 use error::AppError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
@@ -28,6 +28,7 @@ fn get_detected_codex_account() -> Result<Option<AccountSummary>, AppError> {
 #[tauri::command]
 fn list_codex_accounts(app: AppHandle) -> Result<Vec<AccountSummary>, AppError> {
     let store = managed_account_store(&app)?;
+    store.cleanup_legacy_current_state()?;
     let mut ambient_fallback = None;
     let live_identity = match load_ambient_credentials() {
         Ok(credentials) => {
@@ -46,20 +47,9 @@ fn list_codex_accounts(app: AppHandle) -> Result<Vec<AccountSummary>, AppError> 
         Err(_) => None,
     };
 
-    if should_autoswitch_to_live_account(&store)? {
-        if let Some(record) = live_identity
-            .as_ref()
-            .and_then(|identity| identity.record.as_ref())
-        {
-            store.switch_to_account(&record.id.to_string())?;
-        }
-    }
-
-    let selected_account_id = store.selected_account_id()?;
     let records = store.load_accounts()?;
     Ok(summarize_account_list(
         records,
-        selected_account_id,
         live_identity.as_ref(),
         ambient_fallback,
     ))
@@ -80,7 +70,8 @@ async fn reauthenticate_codex_account(
     account_id: String,
 ) -> Result<AccountSummary, AppError> {
     if account_id == "ambient" {
-        login_runner::run_login(&login_state, None, Duration::from_secs(120)).await?;
+        let system_home = system_codex_home_path();
+        login_runner::run_login(&login_state, Some(&system_home), Duration::from_secs(120)).await?;
         return detected_ambient_account()?.ok_or(AppError::AuthNotFound);
     }
 
@@ -100,24 +91,52 @@ fn remove_codex_account(app: AppHandle, account_id: String) -> Result<(), AppErr
         return Err(AppError::UnknownAccount(account_id));
     }
     let store = managed_account_store(&app)?;
-    let account = store.find_account(&account_id)?;
-    if store.selected_account_id()? == Some(account.id) {
-        return Err(AppError::ActiveAccountRemovalBlocked);
-    }
-    if let Ok(credentials) = load_ambient_credentials() {
+    let system_credentials = load_ambient_credentials().ok();
+    remove_codex_account_from_store(&store, &account_id, system_credentials.as_ref())
+}
+
+fn remove_codex_account_from_store(
+    store: &ManagedCodexAccountStore,
+    account_id: &str,
+    system_credentials: Option<&CodexOAuthCredentials>,
+) -> Result<(), AppError> {
+    let account = store.find_account(account_id)?;
+    if let Some(credentials) = system_credentials {
         let records = store.load_accounts()?;
-        if live_system_account_id_for_credentials(&records, &credentials) == Some(account.id) {
+        if live_system_account_id_for_credentials(&records, credentials) == Some(account.id) {
             return Err(AppError::LiveAccountRemovalBlocked);
         }
     }
-    store.remove_account(&account_id)
+    store.remove_account(account_id)
 }
 
 #[tauri::command]
-fn switch_codex_account(app: AppHandle, account_id: String) -> Result<AccountSummary, AppError> {
+fn set_system_codex_account(
+    app: AppHandle,
+    account_id: String,
+) -> Result<AccountSummary, AppError> {
     let store = managed_account_store(&app)?;
-    let account = store.switch_to_account(&account_id)?;
-    Ok(account.summary_with_status(true, false))
+    set_system_codex_account_in_store(&store, &account_id, &system_codex_home_path())
+}
+
+fn set_system_codex_account_in_store(
+    store: &ManagedCodexAccountStore,
+    account_id: &str,
+    system_home: &Path,
+) -> Result<AccountSummary, AppError> {
+    let account = store.find_account(account_id)?;
+    let target_home = PathBuf::from(&account.home_path);
+    let target_credentials = load_credentials_from_home(&target_home)?;
+    if !managed_record_matches_credentials(&account, &target_credentials) {
+        return Err(AppError::AccountIdentityMismatch);
+    }
+
+    preserve_system_account_before_overwrite(store, system_home)?;
+
+    let account = store.find_account(account_id)?;
+    let account_home = PathBuf::from(&account.home_path);
+    replace_auth_json_from_home(&account_home, system_home)?;
+    Ok(account.summary_with_status(true))
 }
 
 #[tauri::command]
@@ -145,7 +164,6 @@ async fn authenticate_managed_account(
     existing_account_id: Option<String>,
 ) -> Result<AccountSummary, AppError> {
     let store = managed_account_store(&app)?;
-    let selected_before = store.selected_account_id()?;
     let preferred_id = existing_account_id
         .as_deref()
         .map(|value| {
@@ -153,9 +171,12 @@ async fn authenticate_managed_account(
         })
         .transpose()?
         .unwrap_or_else(Uuid::new_v4);
-    if let Some(existing_account_id) = existing_account_id.as_deref() {
-        store.find_account(existing_account_id)?;
-    }
+    let system_mirror_home = if let Some(existing_account_id) = existing_account_id.as_deref() {
+        let existing = store.find_account(existing_account_id)?;
+        live_credential_mirror_home_for_account(&existing)?
+    } else {
+        None
+    };
     let home_id = if existing_account_id.is_some() {
         Uuid::new_v4()
     } else {
@@ -175,24 +196,47 @@ async fn authenticate_managed_account(
             return Err(AppError::AccountAlreadyExists);
         }
 
-        let (account, replaced_home_paths) = store.upsert_authenticated_account_and_switch_if(
-            preferred_id,
-            email,
-            provider_account_id,
-            home_path.clone(),
-            selected_before,
-        )?;
+        let (account, replaced_home_paths) =
+            upsert_authenticated_account_and_mirror_system_if_needed(
+                &store,
+                preferred_id,
+                email,
+                provider_account_id,
+                home_path.clone(),
+                system_mirror_home.as_deref(),
+            )?;
         remove_replaced_homes(&store, replaced_home_paths);
         Ok::<ManagedCodexAccountRecord, AppError>(account)
     }
     .await;
 
     match result {
-        Ok(account) => Ok(account.summary()),
+        Ok(account) => Ok(account.summary_with_status(system_mirror_home.is_some())),
         Err(error) => {
             let _ = store.remove_home_if_safe(&home_path);
             Err(error)
         }
+    }
+}
+
+fn upsert_authenticated_account_and_mirror_system_if_needed(
+    store: &ManagedCodexAccountStore,
+    preferred_id: Uuid,
+    email: Option<String>,
+    provider_account_id: Option<String>,
+    home_path: PathBuf,
+    system_mirror_home: Option<&Path>,
+) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError> {
+    if let Some(mirror_home_path) = system_mirror_home {
+        store.upsert_authenticated_account_and_then(
+            preferred_id,
+            email,
+            provider_account_id,
+            home_path.clone(),
+            |_| replace_auth_json_from_home(&home_path, mirror_home_path),
+        )
+    } else {
+        store.upsert_authenticated_account(preferred_id, email, provider_account_id, home_path)
     }
 }
 
@@ -275,7 +319,7 @@ fn live_credential_mirror_home_for_account(
     let ambient = match load_ambient_credentials() {
         Ok(credentials) => credentials,
         Err(AppError::AuthNotFound) => return Ok(None),
-        Err(error) => return Err(error),
+        Err(_) => return Ok(None),
     };
     if live_credential_mirror_home_for_account_with_ambient(account, &ambient) {
         Ok(Some(ambient.home_path))
@@ -284,11 +328,53 @@ fn live_credential_mirror_home_for_account(
     }
 }
 
+fn managed_record_matches_credentials(
+    account: &ManagedCodexAccountRecord,
+    credentials: &CodexOAuthCredentials,
+) -> bool {
+    let email = credentials.email();
+    let provider_account_id = credentials.provider_account_id();
+    identities_match(
+        account.email.as_deref(),
+        account.provider_account_id.as_deref(),
+        email.as_deref(),
+        provider_account_id.as_deref(),
+    )
+}
+
+fn preserve_system_account_before_overwrite(
+    store: &ManagedCodexAccountStore,
+    system_home: &Path,
+) -> Result<(), AppError> {
+    let credentials = match load_credentials_from_home(system_home) {
+        Ok(credentials) => credentials,
+        Err(AppError::AuthNotFound) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    let Some(identity) = ensure_live_account_imported(store, &credentials)? else {
+        return Err(AppError::AccountStore(
+            "current system Codex account has no stable OAuth identity; refusing to overwrite"
+                .to_string(),
+        ));
+    };
+
+    if identity.record.is_none() {
+        return Err(AppError::AccountStore(
+            "current system Codex account could not be preserved; refusing to overwrite"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn live_credential_mirror_home_for_account_with_ambient(
     account: &ManagedCodexAccountRecord,
     ambient: &CodexOAuthCredentials,
 ) -> bool {
-    live_system_account_id_for_credentials(&[account.clone()], ambient) == Some(account.id)
+    live_system_account_id_for_credentials(std::slice::from_ref(account), ambient)
+        == Some(account.id)
 }
 
 fn managed_account_store(app: &AppHandle) -> Result<ManagedCodexAccountStore, AppError> {
@@ -399,17 +485,12 @@ fn canonical_or_original(path: &std::path::Path) -> Result<PathBuf, AppError> {
     })
 }
 
-fn should_autoswitch_to_live_account(store: &ManagedCodexAccountStore) -> Result<bool, AppError> {
-    Ok(store.selected_account_id()?.is_none() && !store.has_materialized_current_directory()?)
-}
-
 fn summarize_account_list(
     records: Vec<ManagedCodexAccountRecord>,
-    selected_account_id: Option<Uuid>,
     live_identity: Option<&LiveCodexIdentity>,
     ambient_fallback: Option<AccountSummary>,
 ) -> Vec<AccountSummary> {
-    let mut summaries = summarize_accounts(records, selected_account_id, live_identity);
+    let mut summaries = summarize_accounts(records, live_identity);
     if let Some(ambient) = ambient_fallback {
         summaries.push(ambient);
     }
@@ -418,15 +499,14 @@ fn summarize_account_list(
 
 fn summarize_accounts(
     mut records: Vec<ManagedCodexAccountRecord>,
-    selected_account_id: Option<Uuid>,
     live_identity: Option<&LiveCodexIdentity>,
 ) -> Vec<AccountSummary> {
     let live_system_account_id = live_system_account_id_for_identity(&records, live_identity);
     records.sort_by(|left, right| {
-        let left_active = selected_account_id == Some(left.id);
-        let right_active = selected_account_id == Some(right.id);
-        right_active
-            .cmp(&left_active)
+        let left_system = live_system_account_id == Some(left.id);
+        let right_system = live_system_account_id == Some(right.id);
+        right_system
+            .cmp(&left_system)
             .then_with(|| left.email.cmp(&right.email))
             .then_with(|| left.provider_account_id.cmp(&right.provider_account_id))
             .then_with(|| left.id.cmp(&right.id))
@@ -435,9 +515,8 @@ fn summarize_accounts(
     records
         .into_iter()
         .map(|record| {
-            let is_active = selected_account_id == Some(record.id);
             let is_live_system = live_system_account_id == Some(record.id);
-            record.summary_with_status(is_active, is_live_system)
+            record.summary_with_status(is_live_system)
         })
         .collect()
 }
@@ -522,6 +601,25 @@ fn emails_match(left: Option<&str>, right: Option<&str>) -> bool {
     }
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .manage(LoginRunnerState::default())
+        .invoke_handler(tauri::generate_handler![
+            add_codex_account,
+            cancel_codex_account_login,
+            get_detected_codex_account,
+            list_codex_accounts,
+            reauthenticate_codex_account,
+            remove_codex_account,
+            set_system_codex_account,
+            refresh_codex_usage,
+            refresh_all_usage
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +632,28 @@ mod tests {
         root
     }
 
+    fn write_auth(home: &Path, access_token: &str, account_id: &str) {
+        fs::create_dir_all(home).unwrap();
+        fs::write(
+            home.join("auth.json"),
+            format!(
+                r#"{{"tokens":{{"access_token":"{access_token}","refresh_token":"refresh-{access_token}","account_id":"{account_id}"}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn auth_credentials(home: &Path, account_id: &str) -> CodexOAuthCredentials {
+        CodexOAuthCredentials {
+            access_token: format!("access-{account_id}"),
+            refresh_token: format!("refresh-{account_id}"),
+            id_token: None,
+            account_id: Some(account_id.to_string()),
+            last_refresh: None,
+            home_path: home.to_path_buf(),
+        }
+    }
+
     fn summary(email: Option<&str>, provider_account_id: Option<&str>) -> AccountSummary {
         AccountSummary {
             id: "test".to_string(),
@@ -543,9 +663,8 @@ mod tests {
             home_path: "/tmp/codex".to_string(),
             source: AccountSourceKind::Managed,
             authenticated: true,
-            is_active: false,
             is_live_system: false,
-            can_switch: true,
+            can_set_system: true,
             can_remove: true,
             created_at: None,
             updated_at: None,
@@ -616,18 +735,17 @@ mod tests {
             record: Some(record.clone()),
         };
 
-        let summaries = summarize_accounts(vec![record], Some(id), Some(&live));
+        let summaries = summarize_accounts(vec![record], Some(&live));
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, id.to_string());
-        assert!(summaries[0].is_active);
         assert!(summaries[0].is_live_system);
-        assert!(!summaries[0].can_switch);
+        assert!(!summaries[0].can_set_system);
         assert!(!summaries[0].can_remove);
     }
 
     #[test]
-    fn inactive_live_system_account_is_not_removable() {
+    fn live_system_account_is_not_removable_or_settable() {
         let id = Uuid::new_v4();
         let record = ManagedCodexAccountRecord {
             id,
@@ -644,12 +762,11 @@ mod tests {
             record: Some(record.clone()),
         };
 
-        let summaries = summarize_accounts(vec![record], None, Some(&live));
+        let summaries = summarize_accounts(vec![record], Some(&live));
 
         assert_eq!(summaries.len(), 1);
-        assert!(!summaries[0].is_active);
         assert!(summaries[0].is_live_system);
-        assert!(summaries[0].can_switch);
+        assert!(!summaries[0].can_set_system);
         assert!(!summaries[0].can_remove);
     }
 
@@ -681,7 +798,7 @@ mod tests {
             record: Some(provider_record.clone()),
         };
 
-        let summaries = summarize_accounts(vec![legacy_record, provider_record], None, Some(&live));
+        let summaries = summarize_accounts(vec![legacy_record, provider_record], Some(&live));
         let legacy_summary = summaries
             .iter()
             .find(|summary| summary.id == legacy_id.to_string())
@@ -693,15 +810,17 @@ mod tests {
 
         assert!(!legacy_summary.is_live_system);
         assert!(legacy_summary.can_remove);
+        assert!(legacy_summary.can_set_system);
         assert!(provider_summary.is_live_system);
         assert!(!provider_summary.can_remove);
+        assert!(!provider_summary.can_set_system);
     }
 
     #[test]
     fn token_only_ambient_account_remains_listed() {
         let ambient = AccountSummary::ambient("/tmp/codex".to_string(), None, None);
 
-        let summaries = summarize_account_list(Vec::new(), None, None, Some(ambient));
+        let summaries = summarize_account_list(Vec::new(), None, Some(ambient));
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "ambient");
@@ -713,27 +832,247 @@ mod tests {
     }
 
     #[test]
-    fn materialized_current_directory_prevents_list_autoswitch() {
+    fn live_system_account_sorts_first() {
         let root = temp_root("list-autoswitch-current-dir");
         let shared = temp_root("list-autoswitch-shared");
         let store =
             ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let first_home = store.create_home(first_id).unwrap();
+        let second_home = store.create_home(second_id).unwrap();
+        store
+            .upsert_authenticated_account(
+                first_id,
+                Some("aaa@example.com".to_string()),
+                Some("account-aaa".to_string()),
+                first_home,
+            )
+            .unwrap();
+        let second = store
+            .upsert_authenticated_account(
+                second_id,
+                Some("zzz@example.com".to_string()),
+                Some("account-system".to_string()),
+                second_home,
+            )
+            .unwrap();
+        let records = store.load_accounts().unwrap();
+        let live = LiveCodexIdentity {
+            email: Some("zzz@example.com".to_string()),
+            provider_account_id: Some("account-system".to_string()),
+            record: Some(second.0),
+        };
+
+        let summaries = summarize_accounts(records, Some(&live));
+
+        assert_eq!(summaries[0].id, second_id.to_string());
+        assert!(summaries[0].is_live_system);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+    }
+
+    #[test]
+    fn setting_managed_account_as_system_writes_auth_json() {
+        let root = temp_root("set-system-root");
+        let shared = temp_root("set-system-shared");
+        let system_home = temp_root("set-system-home");
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
         let id = Uuid::new_v4();
         let home = store.create_home(id).unwrap();
-        fs::write(home.join("auth.json"), "{}").unwrap();
+        write_auth(&home, "target-access", "account-target");
         store
             .upsert_authenticated_account(
                 id,
-                Some("user@example.com".to_string()),
-                Some("account-1".to_string()),
+                Some("target@example.com".to_string()),
+                Some("account-target".to_string()),
                 home,
             )
             .unwrap();
-        fs::create_dir_all(store.current_link_path()).unwrap();
-        fs::write(store.current_link_path().join("auth.json"), "{}").unwrap();
 
-        assert_eq!(store.selected_account_id().unwrap(), None);
-        assert!(!should_autoswitch_to_live_account(&store).unwrap());
+        let summary =
+            set_system_codex_account_in_store(&store, &id.to_string(), &system_home).unwrap();
+        let system_credentials = load_credentials_from_home(&system_home).unwrap();
+
+        assert_eq!(system_credentials.access_token, "target-access");
+        assert!(summary.is_live_system);
+        assert!(!summary.can_set_system);
+        assert!(!summary.can_remove);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(system_home.join("auth.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn previous_system_account_is_imported_before_overwrite() {
+        let root = temp_root("set-system-preserve-root");
+        let shared = temp_root("set-system-preserve-shared");
+        let system_home = temp_root("set-system-preserve-home");
+        write_auth(&system_home, "old-access", "account-old");
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let id = Uuid::new_v4();
+        let home = store.create_home(id).unwrap();
+        write_auth(&home, "target-access", "account-target");
+        store
+            .upsert_authenticated_account(
+                id,
+                Some("target@example.com".to_string()),
+                Some("account-target".to_string()),
+                home,
+            )
+            .unwrap();
+
+        set_system_codex_account_in_store(&store, &id.to_string(), &system_home).unwrap();
+        let accounts = store.load_accounts().unwrap();
+        let preserved = accounts
+            .iter()
+            .find(|account| account.provider_account_id.as_deref() == Some("account-old"))
+            .unwrap();
+        let preserved_credentials =
+            load_credentials_from_home(&PathBuf::from(&preserved.home_path)).unwrap();
+        let system_credentials = load_credentials_from_home(&system_home).unwrap();
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(preserved_credentials.access_token, "old-access");
+        assert_eq!(system_credentials.access_token, "target-access");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn tokenless_system_auth_blocks_overwrite() {
+        let root = temp_root("set-system-tokenless-root");
+        let shared = temp_root("set-system-tokenless-shared");
+        let system_home = temp_root("set-system-tokenless-home");
+        fs::write(
+            system_home.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-test"}"#,
+        )
+        .unwrap();
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let id = Uuid::new_v4();
+        let home = store.create_home(id).unwrap();
+        write_auth(&home, "target-access", "account-target");
+        store
+            .upsert_authenticated_account(
+                id,
+                Some("target@example.com".to_string()),
+                Some("account-target".to_string()),
+                home,
+            )
+            .unwrap();
+
+        let error =
+            set_system_codex_account_in_store(&store, &id.to_string(), &system_home).unwrap_err();
+
+        assert!(matches!(error, AppError::MissingTokens));
+        assert!(fs::read_to_string(system_home.join("auth.json"))
+            .unwrap()
+            .contains("sk-test"));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn setting_already_system_identity_does_not_duplicate_accounts() {
+        let root = temp_root("set-system-same-root");
+        let shared = temp_root("set-system-same-shared");
+        let system_home = temp_root("set-system-same-home");
+        write_auth(&system_home, "system-access", "account-target");
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let id = Uuid::new_v4();
+        let home = store.create_home(id).unwrap();
+        write_auth(&home, "target-access", "account-target");
+        store
+            .upsert_authenticated_account(
+                id,
+                Some("target@example.com".to_string()),
+                Some("account-target".to_string()),
+                home,
+            )
+            .unwrap();
+
+        set_system_codex_account_in_store(&store, &id.to_string(), &system_home).unwrap();
+        let accounts = store.load_accounts().unwrap();
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, id);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn removing_system_account_is_blocked() {
+        let root = temp_root("remove-system-root");
+        let shared = temp_root("remove-system-shared");
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let id = Uuid::new_v4();
+        let home = store.create_home(id).unwrap();
+        store
+            .upsert_authenticated_account(
+                id,
+                Some("target@example.com".to_string()),
+                Some("account-target".to_string()),
+                home,
+            )
+            .unwrap();
+        let credentials = auth_credentials(Path::new("/tmp/codex"), "account-target");
+
+        let error = remove_codex_account_from_store(&store, &id.to_string(), Some(&credentials))
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::LiveAccountRemovalBlocked));
+        assert_eq!(store.load_accounts().unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+    }
+
+    #[test]
+    fn removing_non_system_managed_account_works() {
+        let root = temp_root("remove-non-system-root");
+        let shared = temp_root("remove-non-system-shared");
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let id = Uuid::new_v4();
+        let home = store.create_home(id).unwrap();
+        store
+            .upsert_authenticated_account(
+                id,
+                Some("target@example.com".to_string()),
+                Some("account-target".to_string()),
+                home.clone(),
+            )
+            .unwrap();
+        let credentials = auth_credentials(Path::new("/tmp/codex"), "account-other");
+
+        remove_codex_account_from_store(&store, &id.to_string(), Some(&credentials)).unwrap();
+
+        assert!(store.load_accounts().unwrap().is_empty());
+        assert!(!home.exists());
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(shared);
@@ -882,6 +1221,53 @@ mod tests {
     }
 
     #[test]
+    fn system_reauth_mirror_failure_rolls_back_account_record() {
+        let root = temp_root("reauth-mirror-rollback-root");
+        let shared = temp_root("reauth-mirror-rollback-shared");
+        let mirror_parent = temp_root("reauth-mirror-rollback-mirror");
+        let mirror_home = mirror_parent.join("not-a-directory");
+        fs::write(&mirror_home, "not a directory").unwrap();
+        let store =
+            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
+        let account_id = Uuid::new_v4();
+        let old_home = store.create_home(account_id).unwrap();
+        write_auth(&old_home, "old-access", "account-1");
+        store
+            .upsert_authenticated_account(
+                account_id,
+                Some("user@example.com".to_string()),
+                Some("account-1".to_string()),
+                old_home.clone(),
+            )
+            .unwrap();
+        let new_home = store.create_home(Uuid::new_v4()).unwrap();
+        write_auth(&new_home, "new-access", "account-1");
+
+        let error = upsert_authenticated_account_and_mirror_system_if_needed(
+            &store,
+            account_id,
+            Some("user@example.com".to_string()),
+            Some("account-1".to_string()),
+            new_home.clone(),
+            Some(&mirror_home),
+        )
+        .unwrap_err();
+        let loaded = store.find_account(&account_id.to_string()).unwrap();
+
+        assert!(matches!(error, AppError::AuthRead(_)));
+        assert_eq!(loaded.home_path, old_home.to_string_lossy().to_string());
+        assert_eq!(
+            load_credentials_from_home(&old_home).unwrap().access_token,
+            "old-access"
+        );
+        assert!(new_home.join("auth.json").exists());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(shared);
+        let _ = fs::remove_dir_all(mirror_parent);
+    }
+
+    #[test]
     fn existing_live_account_is_synced_before_returning() {
         let root = temp_root("live-sync-root");
         let source_home = temp_root("live-sync-source");
@@ -974,23 +1360,4 @@ mod tests {
         let _ = fs::remove_dir_all(source_home);
         let _ = fs::remove_dir_all(shared);
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .manage(LoginRunnerState::default())
-        .invoke_handler(tauri::generate_handler![
-            add_codex_account,
-            cancel_codex_account_login,
-            get_detected_codex_account,
-            list_codex_accounts,
-            reauthenticate_codex_account,
-            remove_codex_account,
-            switch_codex_account,
-            refresh_codex_usage,
-            refresh_all_usage
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

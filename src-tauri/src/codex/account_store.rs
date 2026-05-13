@@ -65,10 +65,10 @@ pub struct ManagedCodexAccountRecord {
 
 impl ManagedCodexAccountRecord {
     pub fn summary(&self) -> AccountSummary {
-        self.summary_with_status(false, false)
+        self.summary_with_status(false)
     }
 
-    pub fn summary_with_status(&self, is_active: bool, is_live_system: bool) -> AccountSummary {
+    pub fn summary_with_status(&self, is_live_system: bool) -> AccountSummary {
         AccountSummary::managed(
             self.id.to_string(),
             self.email.clone(),
@@ -77,7 +77,6 @@ impl ManagedCodexAccountRecord {
             self.created_at,
             self.updated_at,
             self.last_authenticated_at,
-            is_active,
             is_live_system,
         )
     }
@@ -129,25 +128,50 @@ impl ManagedCodexAccountStore {
         self.root.join(CURRENT_LINK_NAME)
     }
 
-    pub fn has_materialized_current_directory(&self) -> Result<bool, AppError> {
-        match fs::symlink_metadata(self.current_link_path()) {
-            Ok(metadata) => {
-                let is_replaceable_directory = {
-                    #[cfg(windows)]
-                    {
-                        is_reparse_point(&metadata)
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        false
-                    }
-                };
-                Ok(metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && !is_replaceable_directory)
+    pub fn cleanup_legacy_current_state(&self) -> Result<(), AppError> {
+        cleanup_error_if_unsafe(remove_path_if_exists(&self.current_account_id_path()))?;
+
+        let current = self.current_link_path();
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return cleanup_error_if_unsafe(Err(AppError::AccountStore(error.to_string())))
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(AppError::AccountStore(error.to_string())),
+        };
+
+        if metadata.file_type().is_symlink() {
+            return cleanup_error_if_unsafe(remove_symlink_path(&current));
+        }
+
+        #[cfg(windows)]
+        if metadata.is_dir() && is_reparse_point(&metadata) {
+            return cleanup_error_if_unsafe(
+                fs::remove_dir(&current).map_err(|error| AppError::AccountStore(error.to_string())),
+            );
+        }
+
+        if metadata.is_dir() {
+            if let Err(error) = self.validate_root_child(&current) {
+                return cleanup_error_if_unsafe(Err(error));
+            }
+            let is_empty = match directory_is_empty(&current) {
+                Ok(is_empty) => is_empty,
+                Err(error) => return cleanup_error_if_unsafe(Err(error)),
+            };
+            if is_empty {
+                cleanup_error_if_unsafe(
+                    fs::remove_dir(&current)
+                        .map_err(|error| AppError::AccountStore(error.to_string())),
+                )
+            } else {
+                cleanup_error_if_unsafe(self.backup_legacy_current_directory(&current))
+            }
+        } else {
+            cleanup_error_if_unsafe(
+                fs::remove_file(&current)
+                    .map_err(|error| AppError::AccountStore(error.to_string())),
+            )
         }
     }
 
@@ -291,30 +315,30 @@ impl ManagedCodexAccountStore {
         Ok((record, replaced_home_paths))
     }
 
-    pub fn upsert_authenticated_account_and_switch_if(
+    pub fn upsert_authenticated_account_and_then<F>(
         &self,
         preferred_id: Uuid,
         email: Option<String>,
         provider_account_id: Option<String>,
         home_path: PathBuf,
-        selected_before: Option<Uuid>,
-    ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError> {
+        after_upsert: F,
+    ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError>
+    where
+        F: FnOnce(&ManagedCodexAccountRecord) -> Result<(), AppError>,
+    {
         let previous_accounts = self.load_accounts()?;
         let (record, replaced_home_paths) =
             self.upsert_authenticated_account(preferred_id, email, provider_account_id, home_path)?;
 
-        let switch_current = selected_before.is_none() || selected_before == Some(record.id);
-        if switch_current {
-            if let Err(error) = self.switch_to_account(&record.id.to_string()) {
-                let error_message = error.to_string();
-                self.store_accounts(previous_accounts)
-                    .map_err(|rollback_error| {
-                        AppError::AccountStore(format!(
-                            "switch failed ({error_message}); rollback failed ({rollback_error})"
-                        ))
-                    })?;
-                return Err(error);
-            }
+        if let Err(error) = after_upsert(&record) {
+            let error_message = error.to_string();
+            self.store_accounts(previous_accounts)
+                .map_err(|rollback_error| {
+                    AppError::AccountStore(format!(
+                        "account update failed ({error_message}); rollback failed ({rollback_error})"
+                    ))
+                })?;
+            return Err(error);
         }
 
         Ok((record, replaced_home_paths))
@@ -335,40 +359,9 @@ impl ManagedCodexAccountStore {
         Ok(())
     }
 
-    pub fn switch_to_account(
-        &self,
-        account_id: &str,
-    ) -> Result<ManagedCodexAccountRecord, AppError> {
-        let account = self.find_account(account_id)?;
-        let home = PathBuf::from(&account.home_path);
-        self.validate_managed_home(&home)?;
-        self.prepare_home(&home)?;
-        self.write_current_link(&home)?;
-        self.write_current_account_id(account.id)?;
-        Ok(account)
-    }
-
-    pub fn selected_account_id(&self) -> Result<Option<Uuid>, AppError> {
-        let Some(current_home) = self.current_home_target()? else {
-            return Ok(None);
-        };
-        let current_home = canonical_or_original(&current_home)?;
-        let accounts = self.load_accounts()?;
-        for account in &accounts {
-            let account_home = canonical_or_original(Path::new(&account.home_path))?;
-            if account_home == current_home {
-                return Ok(Some(account.id));
-            }
-        }
-        Ok(None)
-    }
-
     pub fn remove_account(&self, account_id: &str) -> Result<(), AppError> {
         let id = Uuid::parse_str(account_id)
             .map_err(|_| AppError::UnknownAccount(account_id.to_string()))?;
-        if self.selected_account_id()? == Some(id) {
-            return Err(AppError::ActiveAccountRemovalBlocked);
-        }
 
         let mut accounts = self.load_accounts()?;
         let Some(index) = accounts.iter().position(|account| account.id == id) else {
@@ -449,18 +442,16 @@ impl ManagedCodexAccountStore {
         Ok(())
     }
 
-    fn current_home_target(&self) -> Result<Option<PathBuf>, AppError> {
-        let current = self.current_link_path();
-        match fs::read_link(&current) {
-            Ok(target) => Ok(Some(if target.is_absolute() {
-                target
-            } else {
-                self.root.join(target)
-            })),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(_) if current.exists() => Ok(Some(current)),
-            Err(error) => Err(AppError::AccountStore(error.to_string())),
+    fn validate_root_child(&self, path: &Path) -> Result<(), AppError> {
+        let root = canonical_or_original(&self.root)?;
+        let target = canonical_or_original(path)?;
+
+        if target == root || !target.starts_with(&root) {
+            return Err(AppError::UnsafeManagedHome(
+                path.to_string_lossy().to_string(),
+            ));
         }
+        Ok(())
     }
 
     fn migrate_legacy_store_if_needed(&self) -> Result<(), AppError> {
@@ -592,51 +583,18 @@ impl ManagedCodexAccountStore {
         self.root.join(BACKUPS_DIR_NAME).join(home_name)
     }
 
-    fn write_current_link(&self, home: &Path) -> Result<(), AppError> {
-        fs::create_dir_all(&self.root)
+    fn backup_legacy_current_directory(&self, current: &Path) -> Result<(), AppError> {
+        let backup_root = self.root.join(BACKUPS_DIR_NAME);
+        fs::create_dir_all(&backup_root)
             .map_err(|error| AppError::AccountStore(error.to_string()))?;
-        let current = self.current_link_path();
-        let tmp = self.root.join(format!(".current-{}.tmp", Uuid::new_v4()));
-        remove_path_if_exists(&tmp)?;
-        create_symlink(home, &tmp)?;
-        match fs::rename(&tmp, &current) {
-            Ok(()) => {}
-            Err(error) => {
-                #[cfg(not(unix))]
-                {
-                    if let Err(remove_error) = remove_current_link_if_replaceable(&current) {
-                        let _ = remove_path_if_exists(&tmp);
-                        return Err(remove_error);
-                    }
-                    fs::rename(&tmp, &current).map_err(|retry_error| {
-                        let _ = remove_path_if_exists(&tmp);
-                        AppError::AccountStore(format!("{error}; retry failed: {retry_error}"))
-                    })?;
-                }
-
-                #[cfg(unix)]
-                {
-                    let _ = remove_path_if_exists(&tmp);
-                    return Err(AppError::AccountStore(error.to_string()));
-                }
-            }
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        let mut backup = backup_root.join(format!("current-legacy-{timestamp}"));
+        let mut suffix = 1;
+        while backup.exists() {
+            backup = backup_root.join(format!("current-legacy-{timestamp}-{suffix}"));
+            suffix += 1;
         }
-        Ok(())
-    }
-
-    fn write_current_account_id(&self, account_id: Uuid) -> Result<(), AppError> {
-        let target = self.current_account_id_path();
-        let tmp = self
-            .root
-            .join(format!(".current-account-id-{}.tmp", Uuid::new_v4()));
-        fs::write(&tmp, account_id.to_string())
-            .map_err(|error| AppError::AccountStore(error.to_string()))?;
-        apply_secure_file_permissions(&tmp)?;
-        fs::rename(&tmp, &target).map_err(|error| {
-            let _ = remove_path_if_exists(&tmp);
-            AppError::AccountStore(error.to_string())
-        })?;
-        Ok(())
+        move_path(current, &backup)
     }
 }
 
@@ -995,30 +953,26 @@ fn copy_dir_contents(source: &Path, target: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
+fn directory_is_empty(path: &Path) -> Result<bool, AppError> {
+    let mut entries =
+        fs::read_dir(path).map_err(|error| AppError::AccountStore(error.to_string()))?;
+    Ok(entries.next().is_none())
+}
+
+fn cleanup_error_if_unsafe(result: Result<(), AppError>) -> Result<(), AppError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error @ AppError::UnsafeManagedHome(_)) => Err(error),
+        Err(_) => Ok(()),
+    }
+}
+
 fn remove_path_if_exists(path: &Path) -> Result<(), AppError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => remove_symlink_path(path),
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
             fs::remove_dir_all(path).map_err(|error| AppError::AccountStore(error.to_string()))
         }
-        Ok(_) => fs::remove_file(path).map_err(|error| AppError::AccountStore(error.to_string())),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::AccountStore(error.to_string())),
-    }
-}
-
-#[cfg_attr(unix, allow(dead_code))]
-fn remove_current_link_if_replaceable(path: &Path) -> Result<(), AppError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => remove_symlink_path(path),
-        #[cfg(windows)]
-        Ok(metadata) if metadata.is_dir() && is_reparse_point(&metadata) => {
-            fs::remove_dir(path).map_err(|error| AppError::AccountStore(error.to_string()))
-        }
-        Ok(metadata) if metadata.is_dir() => Err(AppError::AccountStore(format!(
-            "refusing to replace materialized Codex current directory: {}",
-            path.to_string_lossy()
-        ))),
         Ok(_) => fs::remove_file(path).map_err(|error| AppError::AccountStore(error.to_string())),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(AppError::AccountStore(error.to_string())),
@@ -1286,36 +1240,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn switch_updates_current_symlink() {
-        let root = temp_root("switch-current");
-        let shared = temp_root("shared-codex");
-        fs::write(shared.join("config.toml"), "model = \"test\"").unwrap();
-        let store =
-            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
-        let id = Uuid::new_v4();
-        let home = store.create_home(id).unwrap();
-        store
-            .upsert_authenticated_account(
-                id,
-                Some("user@example.com".to_string()),
-                Some("account-1".to_string()),
-                home.clone(),
-            )
-            .unwrap();
-
-        store.switch_to_account(&id.to_string()).unwrap();
-
-        assert_eq!(fs::read_link(store.current_link_path()).unwrap(), home);
-        assert_eq!(store.selected_account_id().unwrap(), Some(id));
-        assert!(shared.join("config.toml").exists());
-        assert!(!shared.join("current").exists());
-
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(shared);
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn managed_home_keeps_auth_local_and_links_shared_state() {
         let root = temp_root("auth-overlay");
         let shared = temp_root("auth-overlay-shared");
@@ -1414,168 +1338,47 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn switching_accounts_keeps_history_linked_to_same_shared_state() {
-        let root = temp_root("shared-switching");
-        let shared = temp_root("shared-switching-codex");
-        fs::write(shared.join("history.jsonl"), "shared-history").unwrap();
-        let store =
-            ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
-        let first_id = Uuid::new_v4();
-        let second_id = Uuid::new_v4();
-        let first_home = store.create_home(first_id).unwrap();
-        let second_home = store.create_home(second_id).unwrap();
-        store
-            .upsert_authenticated_account(
-                first_id,
-                Some("one@example.com".to_string()),
-                Some("account-1".to_string()),
-                first_home.clone(),
-            )
-            .unwrap();
-        store
-            .upsert_authenticated_account(
-                second_id,
-                Some("two@example.com".to_string()),
-                Some("account-2".to_string()),
-                second_home.clone(),
-            )
-            .unwrap();
-
-        store.switch_to_account(&first_id.to_string()).unwrap();
-        assert_symlink_to(
-            &store.current_link_path().join("history.jsonl"),
-            &shared.join("history.jsonl"),
-        );
-        store.switch_to_account(&second_id.to_string()).unwrap();
-        assert_symlink_to(
-            &store.current_link_path().join("history.jsonl"),
-            &shared.join("history.jsonl"),
-        );
-
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(shared);
-    }
-
-    #[test]
-    fn materialized_current_directory_is_not_treated_as_selected() {
-        let root = temp_root("switch-current-copy");
+    fn legacy_current_symlink_and_account_id_are_cleaned_up() {
+        let root = temp_root("cleanup-current-symlink");
         let store = ManagedCodexAccountStore::new(root.clone());
-        let id = Uuid::new_v4();
-        let home = store.create_home(id).unwrap();
-        fs::write(home.join("auth.json"), "{}").unwrap();
-        store
-            .upsert_authenticated_account(
-                id,
-                Some("user@example.com".to_string()),
-                Some("account-1".to_string()),
-                home.clone(),
-            )
-            .unwrap();
+        let target = temp_root("cleanup-current-target");
+        std::os::unix::fs::symlink(&target, store.current_link_path()).unwrap();
+        fs::write(store.current_account_id_path(), Uuid::new_v4().to_string()).unwrap();
 
-        copy_dir_contents(&home, &store.current_link_path()).unwrap();
-        store.write_current_account_id(id).unwrap();
+        store.cleanup_legacy_current_state().unwrap();
 
-        assert!(store.current_link_path().join("auth.json").exists());
-        assert_eq!(store.selected_account_id().unwrap(), None);
+        assert!(!store.current_link_path().exists());
+        assert!(!store.current_account_id_path().exists());
+        assert!(target.exists());
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(target);
     }
 
     #[test]
-    fn materialized_current_directory_is_not_removed_as_replaceable_link() {
-        let root = temp_root("protect-current-directory");
-        let current = root.join("current");
+    fn non_empty_materialized_current_directory_is_moved_to_backups() {
+        let root = temp_root("cleanup-current-backup");
+        let store = ManagedCodexAccountStore::new(root.clone());
+        let current = store.current_link_path();
         fs::create_dir_all(current.join("sessions")).unwrap();
-        fs::write(current.join("auth.json"), "{}").unwrap();
-        fs::write(current.join("sessions").join("session.jsonl"), "{}").unwrap();
+        fs::write(current.join("auth.json"), "legacy-auth").unwrap();
+        fs::write(
+            current.join("sessions").join("session.jsonl"),
+            "legacy-session",
+        )
+        .unwrap();
 
-        let error = remove_current_link_if_replaceable(&current).unwrap_err();
+        store.cleanup_legacy_current_state().unwrap();
 
-        assert!(matches!(error, AppError::AccountStore(_)));
-        assert!(current.join("auth.json").exists());
-        assert!(current.join("sessions").join("session.jsonl").exists());
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn switching_failure_rolls_back_stored_account_home() {
-        let root = temp_root("switch-rollback");
-        let store = ManagedCodexAccountStore::new(root.clone());
-        let id = Uuid::new_v4();
-        let first_home = store.create_home(id).unwrap();
-        store
-            .upsert_authenticated_account(
-                id,
-                Some("user@example.com".to_string()),
-                Some("account-1".to_string()),
-                first_home.clone(),
-            )
-            .unwrap();
-        fs::create_dir_all(store.current_link_path()).unwrap();
-
-        let second_home = store.create_home(Uuid::new_v4()).unwrap();
-        let error = store
-            .upsert_authenticated_account_and_switch_if(
-                id,
-                Some("updated@example.com".to_string()),
-                Some("account-1".to_string()),
-                second_home,
-                Some(id),
-            )
-            .unwrap_err();
-        let loaded = store.load_accounts().unwrap();
-
-        assert!(matches!(error, AppError::AccountStore(_)));
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(
-            loaded[0].home_path,
-            first_home.to_string_lossy().to_string()
-        );
-        assert_eq!(loaded[0].email.as_deref(), Some("user@example.com"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn active_legacy_upgrade_relinks_current_before_old_home_removal() {
-        let root = temp_root("active-legacy-upgrade");
-        let store = ManagedCodexAccountStore::new(root.clone());
-        let legacy_id = Uuid::new_v4();
-        let preferred_id = Uuid::new_v4();
-        let legacy_home = store.create_home(legacy_id).unwrap();
-        store
-            .upsert_authenticated_account(
-                legacy_id,
-                Some("user@example.com".to_string()),
-                None,
-                legacy_home.clone(),
-            )
-            .unwrap();
-        store.switch_to_account(&legacy_id.to_string()).unwrap();
-
-        let upgraded_home = store.create_home(preferred_id).unwrap();
-        let (record, replaced_home_paths) = store
-            .upsert_authenticated_account_and_switch_if(
-                preferred_id,
-                Some("user@example.com".to_string()),
-                Some("account-1".to_string()),
-                upgraded_home.clone(),
-                Some(legacy_id),
-            )
-            .unwrap();
-
-        assert_eq!(record.id, legacy_id);
-        assert_eq!(replaced_home_paths, vec![legacy_home.clone()]);
-        assert_eq!(
-            fs::read_link(store.current_link_path()).unwrap(),
-            upgraded_home
-        );
-
-        store.remove_home_if_safe(&legacy_home).unwrap();
-        assert_eq!(store.selected_account_id().unwrap(), Some(legacy_id));
+        assert!(!current.exists());
+        assert!(path_contains_file_with_contents(
+            &root.join(BACKUPS_DIR_NAME),
+            "legacy-auth"
+        ));
+        assert!(path_contains_file_with_contents(
+            &root.join(BACKUPS_DIR_NAME),
+            "legacy-session"
+        ));
 
         let _ = fs::remove_dir_all(root);
     }

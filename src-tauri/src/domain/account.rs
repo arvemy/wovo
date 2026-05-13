@@ -18,9 +18,8 @@ pub struct AccountSummary {
     pub home_path: String,
     pub source: AccountSourceKind,
     pub authenticated: bool,
-    pub is_active: bool,
     pub is_live_system: bool,
-    pub can_switch: bool,
+    pub can_set_system: bool,
     pub can_remove: bool,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
@@ -46,9 +45,8 @@ impl AccountSummary {
             home_path,
             source: AccountSourceKind::Ambient,
             authenticated: true,
-            is_active: false,
             is_live_system: true,
-            can_switch: false,
+            can_set_system: false,
             can_remove: false,
             created_at: None,
             updated_at: None,
@@ -56,6 +54,7 @@ impl AccountSummary {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn managed(
         id: String,
         email: Option<String>,
@@ -64,7 +63,6 @@ impl AccountSummary {
         created_at: i64,
         updated_at: i64,
         last_authenticated_at: Option<i64>,
-        is_active: bool,
         is_live_system: bool,
     ) -> Self {
         let label = email
@@ -80,10 +78,9 @@ impl AccountSummary {
             home_path,
             source: AccountSourceKind::Managed,
             authenticated: true,
-            is_active,
             is_live_system,
-            can_switch: !is_active,
-            can_remove: !is_active && !is_live_system,
+            can_set_system: !is_live_system,
+            can_remove: !is_live_system,
             created_at: Some(created_at),
             updated_at: Some(updated_at),
             last_authenticated_at,
@@ -105,11 +102,10 @@ mod tests {
             1,
             2,
             Some(3),
-            false,
             true,
         );
 
-        assert!(account.can_switch);
+        assert!(!account.can_set_system);
         assert!(!account.can_remove);
     }
 }

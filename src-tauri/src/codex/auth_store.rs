@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -62,7 +63,7 @@ struct AuthTokens {
     account_id: Option<String>,
 }
 
-pub fn ambient_home_path() -> PathBuf {
+pub fn system_codex_home_path() -> PathBuf {
     if let Ok(raw) = env::var("CODEX_HOME") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
@@ -86,7 +87,7 @@ pub fn detected_ambient_account() -> Result<Option<AccountSummary>, AppError> {
 }
 
 pub fn load_ambient_credentials() -> Result<CodexOAuthCredentials, AppError> {
-    load_credentials_from_home(&ambient_home_path())
+    load_credentials_from_home(&system_codex_home_path())
 }
 
 pub fn load_credentials_from_home(home_path: &Path) -> Result<CodexOAuthCredentials, AppError> {
@@ -129,7 +130,56 @@ pub fn save_credentials(credentials: &CodexOAuthCredentials) -> Result<(), AppEr
 
     let next = serde_json::to_string_pretty(&root)
         .map_err(|error| AppError::AuthDecode(error.to_string()))?;
-    fs::write(auth_path, next).map_err(|error| AppError::AuthRead(error.to_string()))
+    write_auth_json(&auth_path, next.as_bytes())
+}
+
+pub fn replace_auth_json_from_home(source_home: &Path, target_home: &Path) -> Result<(), AppError> {
+    let contents = fs::read(source_home.join("auth.json"))
+        .map_err(|error| AppError::AuthRead(error.to_string()))?;
+    let target_auth = target_home.join("auth.json");
+    write_auth_json(&target_auth, &contents)
+}
+
+fn write_auth_json(auth_path: &Path, contents: &[u8]) -> Result<(), AppError> {
+    let parent = auth_path.parent().ok_or_else(|| {
+        AppError::AuthRead(format!(
+            "auth path has no parent: {}",
+            auth_path.to_string_lossy()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| AppError::AuthRead(error.to_string()))?;
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let tmp = parent.join(format!(".auth.json.{nonce}.tmp"));
+    fs::write(&tmp, contents).map_err(|error| AppError::AuthRead(error.to_string()))?;
+    apply_secure_file_permissions(&tmp)?;
+
+    match fs::rename(&tmp, auth_path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            #[cfg(windows)]
+            {
+                if auth_path.exists() {
+                    fs::remove_file(auth_path)
+                        .map_err(|remove_error| AppError::AuthRead(remove_error.to_string()))?;
+                    fs::rename(&tmp, auth_path)
+                        .map_err(|rename_error| AppError::AuthRead(rename_error.to_string()))
+                } else {
+                    let _ = fs::remove_file(&tmp);
+                    Err(AppError::AuthRead(error.to_string()))
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                let _ = fs::remove_file(&tmp);
+                Err(AppError::AuthRead(error.to_string()))
+            }
+        }
+    }
 }
 
 fn parse_auth_json(contents: &str, home_path: PathBuf) -> Result<CodexOAuthCredentials, AppError> {
@@ -195,6 +245,18 @@ fn dirs_home() -> PathBuf {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."))
         })
+}
+
+#[cfg(unix)]
+fn apply_secure_file_permissions(path: &Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(path, permissions).map_err(|error| AppError::AuthRead(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError> {
+    Ok(())
 }
 
 #[cfg(test)]

@@ -18,9 +18,8 @@ struct AccountSummary {
     id: String,
     label: String,
     source: AccountSourceKind,
-    is_active: bool,
     is_live_system: bool,
-    can_switch: bool,
+    can_set_system: bool,
     can_remove: bool,
 }
 
@@ -274,12 +273,12 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let switch_account = move |account_id: String| {
+    let set_system_account = move |account_id: String| {
         spawn_local(async move {
             set_is_account_action_loading.set(true);
             set_global_error.set(None);
 
-            match account_action::<AccountSummary>("switch_codex_account", &account_id).await {
+            match account_action::<AccountSummary>("set_system_codex_account", &account_id).await {
                 Ok(_) => load_accounts_and_usage(),
                 Err(error) => set_global_error.set(Some(error.message)),
             }
@@ -404,19 +403,17 @@ pub fn App() -> impl IntoView {
                                     let id_for_loading = account.id.clone();
                                     let id_for_reauth = account.id.clone();
                                     let id_for_remove = account.id.clone();
-                                    let id_for_switch = account.id.clone();
+                                    let id_for_set_system = account.id.clone();
                                     let id_for_reauth_action = account.id.clone();
                                     let id_for_label = account.id.clone();
                                     let id_for_source = account.id.clone();
-                                    let id_for_active = account.id.clone();
                                     let id_for_live_system = account.id.clone();
-                                    let id_for_can_switch = account.id.clone();
+                                    let id_for_can_set_system = account.id.clone();
                                     let id_for_can_remove = account.id.clone();
                                     let fallback_label = account.label.clone();
                                     let fallback_source = account.source.clone();
-                                    let fallback_is_active = account.is_active;
                                     let fallback_is_live_system = account.is_live_system;
-                                    let fallback_can_switch = account.can_switch;
+                                    let fallback_can_set_system = account.can_set_system;
                                     let fallback_can_remove = account.can_remove;
 
                                     let usage_signal = move || usage_by_id.with(|map| map.get(&id_for_usage).cloned());
@@ -437,13 +434,6 @@ pub fn App() -> impl IntoView {
                                             .map(|item| item.source == AccountSourceKind::Managed)
                                             .unwrap_or(fallback_source == AccountSourceKind::Managed)
                                     });
-                                    let active_signal = move || accounts.with(|items| {
-                                        items
-                                            .iter()
-                                            .find(|item| item.id == id_for_active)
-                                            .map(|item| item.is_active)
-                                            .unwrap_or(fallback_is_active)
-                                    });
                                     let live_system_signal = move || accounts.with(|items| {
                                         items
                                             .iter()
@@ -451,12 +441,12 @@ pub fn App() -> impl IntoView {
                                             .map(|item| item.is_live_system)
                                             .unwrap_or(fallback_is_live_system)
                                     });
-                                    let can_switch_signal = move || accounts.with(|items| {
+                                    let can_set_system_signal = move || accounts.with(|items| {
                                         items
                                             .iter()
-                                            .find(|item| item.id == id_for_can_switch)
-                                            .map(|item| item.can_switch)
-                                            .unwrap_or(fallback_can_switch)
+                                            .find(|item| item.id == id_for_can_set_system)
+                                            .map(|item| item.can_set_system)
+                                            .unwrap_or(fallback_can_set_system)
                                     });
                                     let can_remove_signal = move || accounts.with(|items| {
                                         items
@@ -470,16 +460,15 @@ pub fn App() -> impl IntoView {
                                         <AccountRow
                                             label=label_signal
                                             is_managed=managed_signal
-                                            is_active=active_signal
                                             is_live_system=live_system_signal
-                                            can_switch=can_switch_signal
+                                            can_set_system=can_set_system_signal
                                             can_remove=can_remove_signal
                                             usage=usage_signal
                                             error=error_signal
                                             is_loading=loading_signal
                                             reauth_required=reauth_signal
                                             disabled=any_action_in_flight
-                                            on_switch=Box::new(move || switch_account(id_for_switch.clone()))
+                                            on_set_system=Box::new(move || set_system_account(id_for_set_system.clone()))
                                             on_remove=Box::new(move || remove_account(id_for_remove.clone()))
                                             on_reauth=Box::new(move || reauthenticate_account(id_for_reauth_action.clone()))
                                         />
@@ -504,17 +493,6 @@ pub fn App() -> impl IntoView {
                     }
                 }}
             </p>
-            {move || {
-                if accounts.with(|items| items.is_empty()) {
-                    view! { <span></span> }.into_any()
-                } else {
-                    view! {
-                        <p class="mt-3 font-mono text-[11px] text-[var(--muted-foreground)]">
-                            "export CODEX_HOME=\"$HOME/.wovo/codex/current\""
-                        </p>
-                    }.into_any()
-                }
-            }}
         </main>
     }
 }
@@ -541,26 +519,24 @@ where
 }
 
 #[component]
-fn AccountRow<T, M, A, S, C, X, U, E, L, R, D>(
+fn AccountRow<T, M, S, C, X, U, E, L, R, D>(
     label: T,
     is_managed: M,
-    is_active: A,
     is_live_system: S,
-    can_switch: C,
+    can_set_system: C,
     can_remove: X,
     usage: U,
     error: E,
     is_loading: L,
     reauth_required: R,
     disabled: D,
-    on_switch: Box<dyn Fn() + Send + Sync>,
+    on_set_system: Box<dyn Fn() + Send + Sync>,
     on_remove: Box<dyn Fn() + Send + Sync>,
     on_reauth: Box<dyn Fn() + Send + Sync>,
 ) -> impl IntoView
 where
     T: Fn() -> String + Send + Sync + 'static,
     M: Fn() -> bool + Send + Sync + 'static,
-    A: Fn() -> bool + Send + Sync + 'static,
     S: Fn() -> bool + Send + Sync + 'static,
     C: Fn() -> bool + Send + Sync + 'static,
     X: Fn() -> bool + Send + Sync + 'static,
@@ -572,28 +548,28 @@ where
 {
     let label = StoredValue::new(label);
     let is_managed = StoredValue::new(is_managed);
-    let is_active = StoredValue::new(is_active);
     let is_live_system = StoredValue::new(is_live_system);
-    let can_switch = StoredValue::new(can_switch);
+    let can_set_system = StoredValue::new(can_set_system);
     let can_remove = StoredValue::new(can_remove);
     let usage = StoredValue::new(usage);
     let error = StoredValue::new(error);
     let is_loading = StoredValue::new(is_loading);
     let reauth_required = StoredValue::new(reauth_required);
     let disabled = StoredValue::new(disabled);
-    let on_switch = StoredValue::new(on_switch);
+    let on_set_system = StoredValue::new(on_set_system);
     let on_remove = StoredValue::new(on_remove);
     let on_reauth = StoredValue::new(on_reauth);
 
+    let disabled_for_set_system = disabled;
+    let disabled_for_reauth = disabled;
+    let disabled_for_remove = disabled;
     let is_loading_call = move || is_loading.with_value(|f| f());
     let reauth_required_call = move || reauth_required.with_value(|f| f());
-    let disabled_call = move || disabled.with_value(|f| f());
 
     let label_call = move || label.with_value(|f| f());
     let is_managed_call = move || is_managed.with_value(|f| f());
-    let is_active_call = move || is_active.with_value(|f| f());
     let is_live_system_call = move || is_live_system.with_value(|f| f());
-    let can_switch_call = move || can_switch.with_value(|f| f());
+    let can_set_system_call = move || can_set_system.with_value(|f| f());
     let can_remove_call = move || can_remove.with_value(|f| f());
     let plan_label = move || usage.with_value(|f| f().and_then(|s| s.plan_type));
     let primary = move || usage.with_value(|f| f().and_then(|s| s.primary));
@@ -606,15 +582,6 @@ where
             <div class="mb-3 flex items-start justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-baseline gap-2">
                     <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">{label_call}</h2>
-                    {move || {
-                        if is_active_call() {
-                            view! {
-                                <span class="shrink-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">"Active"</span>
-                            }.into_any()
-                        } else {
-                            view! { <span></span> }.into_any()
-                        }
-                    }}
                     {move || {
                         if is_live_system_call() {
                             view! {
@@ -630,15 +597,15 @@ where
                 </div>
                 <div class="flex items-center gap-2 max-sm:justify-end">
                     {move || {
-                        if can_switch_call() {
+                        if can_set_system_call() {
                             view! {
                                 <button
                                     class="inline-flex h-8 items-center justify-center whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-xs font-medium hover:cursor-pointer hover:bg-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
                                     type="button"
-                                    disabled=move || disabled_call()
-                                    on:click=move |_| on_switch.with_value(|f| f())
+                                    disabled=move || disabled_for_set_system.with_value(|f| f())
+                                    on:click=move |_| on_set_system.with_value(|f| f())
                                 >
-                                    "Use"
+                                    "Set as System"
                                 </button>
                             }.into_any()
                         } else {
@@ -652,7 +619,7 @@ where
                                 <button
                                     class="inline-flex h-8 items-center justify-center whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-xs font-medium hover:cursor-pointer hover:bg-[var(--accent)] disabled:pointer-events-none disabled:opacity-50"
                                     type="button"
-                                    disabled=move || disabled_call()
+                                    disabled=move || disabled_for_reauth.with_value(|f| f())
                                     on:click=trigger
                                 >
                                     "Re-auth"
@@ -670,7 +637,7 @@ where
                                         class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-[var(--muted-foreground)] hover:cursor-pointer hover:border-[var(--border)] hover:bg-[var(--destructive,var(--accent))] hover:text-[var(--destructive-foreground,var(--foreground))] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
                                         type="button"
                                         aria-label="Remove account"
-                                        disabled=move || disabled_call()
+                                        disabled=move || disabled_for_remove.with_value(|f| f())
                                         on:click=move |_| on_remove.with_value(|f| f())
                                     >
                                         <Trash2 class="size-4"/>
