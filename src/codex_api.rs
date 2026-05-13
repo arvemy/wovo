@@ -197,6 +197,7 @@ pub(crate) struct UsageWindow {
     pub(crate) used_percent: f64,
     pub(crate) remaining_percent: f64,
     pub(crate) reset_at: Option<i64>,
+    pub(crate) window_seconds: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

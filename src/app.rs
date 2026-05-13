@@ -24,7 +24,7 @@ use crate::ui::{
     card::{Card, CardSize},
     checkbox::Checkbox,
     separator::Separator,
-    tooltip::{Tooltip, TooltipContent, TooltipPosition},
+    tooltip::{Tooltip, TooltipAlign, TooltipContent, TooltipPosition},
 };
 use icons::{EllipsisVertical, Info, LoaderCircle, Monitor, Moon, Plus, RefreshCw, Sun, Trash2, X};
 use leptos::prelude::*;
@@ -34,9 +34,39 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+const SECONDS_PER_DAY: f64 = 86_400.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderPage {
+    Codex,
+    Anthropic,
+}
+
+impl ProviderPage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Anthropic => "Claude Code",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct UsageRunwayEstimate {
+    rate_percent_per_day: f64,
+    days_until_limit: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AutoSwitchRunwayEstimate {
+    days_until_limit: f64,
+    account_count: usize,
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let initial_theme_mode = current_theme_preference();
+    let (active_provider, set_active_provider) = signal(ProviderPage::Codex);
     let (accounts, set_accounts) = signal::<Vec<AccountSummary>>(Vec::new());
     let (usage_by_id, set_usage_by_id) = signal::<HashMap<String, UsageSnapshot>>(HashMap::new());
     let (errors_by_id, set_errors_by_id) = signal::<HashMap<String, String>>(HashMap::new());
@@ -589,30 +619,35 @@ pub fn App() -> impl IntoView {
             .filter(|event| !dismissed.contains(&event.id))
             .collect::<Vec<_>>()
     });
+    let auto_switch_runway = Memo::new(move |_| {
+        let current_accounts = accounts.get();
+        let current_usage = usage_by_id.get();
+        let current_errors = errors_by_id.get();
+        auto_switch_runway_estimate(&current_accounts, &current_usage, &current_errors)
+    });
 
     view! {
-        <main
-            class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-background py-6 text-foreground max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4"
+        <div
+            class="min-h-screen overflow-hidden bg-background text-foreground"
             on:click=move |_| {
                 if hide_account_credentials.get_untracked() {
                     set_revealed_credential.set(None);
                 }
             }
         >
-            <div class="mb-5 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
-                <div class="flex min-w-0 items-center gap-3">
-                    <img src="/public/openai-black.svg" class="size-12 shrink-0 dark:hidden" alt="Codex"/>
-                    <img src="/public/openai-white.svg" class="hidden size-12 shrink-0 dark:block" alt="Codex"/>
-                </div>
-                <div class="flex items-center gap-2 max-sm:justify-end">
-                    <label class="inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground shadow-xs transition-colors hover:bg-accent">
-                        <Checkbox
-                            checked=move || auto_account_switching_enabled.get()
+            <div class="app-shell mx-auto flex h-screen w-[min(960px,calc(100vw-1rem))] min-w-0 flex-col gap-3 px-3 py-3">
+                <nav class="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border">
+                    <ProviderNav
+                        active=move || active_provider.get()
+                        on_select=Box::new(move |page| set_active_provider.set(page))
+                    />
+                    <div class="flex min-w-0 items-center gap-2">
+                        <AutoSwitchStatus
+                            enabled=move || auto_account_switching_enabled.get()
                             disabled=move || is_settings_loading.get() || any_action_in_flight()
-                            on_change=move |enabled| change_auto_account_switching_enabled(enabled)
+                            estimate=move || auto_switch_runway.get()
+                            on_change=Box::new(move |enabled| change_auto_account_switching_enabled(enabled))
                         />
-                        <span>"Auto switch"</span>
-                    </label>
                     <Tooltip>
                         <button
                             class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
@@ -664,6 +699,7 @@ pub fn App() -> impl IntoView {
                         </TooltipContent>
                     </Tooltip>
                     <div class="relative">
+                        <Tooltip>
                         <button
                             class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                             type="button"
@@ -673,6 +709,10 @@ pub fn App() -> impl IntoView {
                         >
                             <EllipsisVertical class="size-4"/>
                         </button>
+                            <TooltipContent position=TooltipPosition::Bottom>
+                                "Settings"
+                            </TooltipContent>
+                        </Tooltip>
                         {move || is_menu_open.get().then(|| view! {
                             <div
                                 class="fixed inset-0 z-40"
@@ -778,7 +818,7 @@ pub fn App() -> impl IntoView {
                                         on_change=move |enabled| change_hide_account_credentials(enabled)
                                     />
                                     <div>
-                                        <p class="text-sm font-medium leading-none">"Hide account credentials"</p>
+                                        <p class="text-sm font-medium leading-none">"Hide credentials"</p>
                                         <p class="mt-0.5 text-[11px] text-muted-foreground">"Blur account labels"</p>
                                     </div>
                                 </label>
@@ -834,8 +874,12 @@ pub fn App() -> impl IntoView {
                         })}
                     </div>
                 </div>
-            </div>
+                </nav>
+                {move || match active_provider.get() {
+                    ProviderPage::Codex => view! {
+                        <main class="codex-page flex min-h-0 flex-1 flex-col overflow-visible">
 
+            <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1 pb-3">
             {move || {
                 cost_usage.get().map(|usage| view! {
                     <CostSummary usage=usage/>
@@ -857,6 +901,7 @@ pub fn App() -> impl IntoView {
                                 class="shrink-0 opacity-70 hover:opacity-100 hover:cursor-pointer"
                                 type="button"
                                 aria-label="Dismiss error"
+                                title="Dismiss error"
                                 on:click=move |_| set_global_error.set(None)
                             >
                                 <X class="size-4"/>
@@ -1057,7 +1102,173 @@ pub fn App() -> impl IntoView {
                     }
                 }}
             </p>
+            </div>
         </main>
+                    }
+                    .into_any(),
+                    ProviderPage::Anthropic => view! { <ComingSoonPage/> }.into_any(),
+                }}
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn ProviderNav<A>(active: A, on_select: Box<dyn Fn(ProviderPage) + Send + Sync>) -> impl IntoView
+where
+    A: Fn() -> ProviderPage + Send + Sync + 'static,
+{
+    let active = StoredValue::new(active);
+    let on_select = StoredValue::new(on_select);
+
+    view! {
+        <div class="flex shrink-0 items-center gap-1.5">
+            <div class="flex min-w-0 items-center gap-1.5" role="tablist" aria-label="Provider">
+                <ProviderNavButton
+                    page=ProviderPage::Codex
+                    active=move || active.with_value(|f| f()) == ProviderPage::Codex
+                    on_select=Box::new(move |page| on_select.with_value(|f| f(page)))
+                />
+                <ProviderNavButton
+                    page=ProviderPage::Anthropic
+                    active=move || active.with_value(|f| f()) == ProviderPage::Anthropic
+                    on_select=Box::new(move |page| on_select.with_value(|f| f(page)))
+                />
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn ProviderNavButton<A>(
+    page: ProviderPage,
+    active: A,
+    on_select: Box<dyn Fn(ProviderPage) + Send + Sync>,
+) -> impl IntoView
+where
+    A: Fn() -> bool + Send + Sync + 'static,
+{
+    let active = StoredValue::new(active);
+    let on_select = StoredValue::new(on_select);
+    let label = page.label();
+
+    view! {
+        <Tooltip>
+            <button
+                class=move || if active.with_value(|f| f()) {
+                    "inline-flex size-10 items-center justify-center rounded-md border border-primary bg-accent text-foreground shadow-xs transition-colors"
+                } else {
+                    "inline-flex size-10 items-center justify-center rounded-md border border-border bg-background text-muted-foreground shadow-xs transition-colors hover:cursor-pointer hover:bg-accent hover:text-foreground"
+                }
+                type="button"
+                role="tab"
+                aria-selected=move || active.with_value(|f| f()).to_string()
+                aria-label=label
+                on:click=move |_| on_select.with_value(|f| f(page))
+            >
+                {match page {
+                    ProviderPage::Codex => view! {
+                        <>
+                            <img src="/public/openai-black.svg" class="size-7 shrink-0 dark:hidden" alt=""/>
+                            <img src="/public/openai-white.svg" class="hidden size-7 shrink-0 dark:block" alt=""/>
+                        </>
+                    }
+                    .into_any(),
+                    ProviderPage::Anthropic => view! {
+                        <>
+                            <img src="/public/anthropic-black.svg" class="size-7 shrink-0 dark:hidden" alt=""/>
+                            <img src="/public/anthropic-white.svg" class="hidden size-7 shrink-0 dark:block" alt=""/>
+                        </>
+                    }
+                    .into_any(),
+                }}
+            </button>
+            <TooltipContent position=TooltipPosition::Bottom align=TooltipAlign::Start>
+                {label}
+            </TooltipContent>
+        </Tooltip>
+    }
+}
+
+#[component]
+fn ComingSoonPage() -> impl IntoView {
+    view! {
+        <main class="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+            <div class="grid justify-items-center gap-3 text-center">
+                <img src="/public/anthropic-black.svg" class="size-12 dark:hidden" alt="Anthropic"/>
+                <img src="/public/anthropic-white.svg" class="hidden size-12 dark:block" alt="Anthropic"/>
+                <div class="grid gap-1">
+                    <h1 class="text-sm font-semibold leading-none">"Claude Code"</h1>
+                    <p class="text-xs text-muted-foreground">"Coming Soon"</p>
+                </div>
+            </div>
+        </main>
+    }
+}
+
+#[component]
+fn AutoSwitchStatus<E, D, T>(
+    enabled: E,
+    disabled: D,
+    estimate: T,
+    on_change: Box<dyn Fn(bool) + Send + Sync>,
+) -> impl IntoView
+where
+    E: Fn() -> bool + Send + Sync + 'static,
+    D: Fn() -> bool + Send + Sync + 'static,
+    T: Fn() -> Option<AutoSwitchRunwayEstimate> + Send + Sync + 'static,
+{
+    let enabled = StoredValue::new(enabled);
+    let disabled = StoredValue::new(disabled);
+    let estimate = StoredValue::new(estimate);
+    let on_change = StoredValue::new(on_change);
+
+    view! {
+        <Tooltip>
+            <label class="inline-flex h-9 max-w-full shrink-0 cursor-pointer items-center gap-2 rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground shadow-xs transition-colors hover:bg-accent">
+                <Checkbox
+                    checked=move || enabled.with_value(|f| f())
+                    disabled=move || disabled.with_value(|f| f())
+                    on_change=move |checked| on_change.with_value(|f| f(checked))
+                />
+                <span>"Auto switch"</span>
+                <span class="rounded-sm bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                    {move || estimate.with_value(|f| f())
+                        .map(|estimate| format!("Pool {}", format_usage_days(estimate.days_until_limit)))
+                        .unwrap_or_else(|| "Pool n/a".to_string())
+                    }
+                </span>
+            </label>
+            <TooltipContent
+                class="w-60 whitespace-normal text-left leading-5"
+                position=TooltipPosition::Bottom
+                align=TooltipAlign::End
+            >
+                {move || estimate.with_value(|f| f())
+                    .map(|estimate| {
+                        format!(
+                            "Auto-switch pool: {} across {} managed accounts.",
+                            format_usage_days(estimate.days_until_limit),
+                            estimate.account_count,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "Auto-switch pool estimate needs weekly usage on a managed account.".to_string()
+                    })
+                }
+            </TooltipContent>
+        </Tooltip>
+    }
+}
+
+#[component]
+fn UsageRunway(estimate: UsageRunwayEstimate) -> impl IntoView {
+    view! {
+        <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-sm bg-secondary px-2 py-1 text-[11px] text-muted-foreground">
+            <span class="font-medium text-foreground">
+                {format!("Estimated {} usage left", format_usage_days(estimate.days_until_limit))}
+            </span>
+        </div>
     }
 }
 
@@ -1128,6 +1339,7 @@ where
                 class="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-sm leading-none opacity-70 hover:cursor-pointer hover:border-current/20 hover:opacity-100"
                 type="button"
                 aria-label="Dismiss quota notification"
+                title="Dismiss quota notification"
                 on:click=move |_| on_dismiss(event_id.clone())
             >
                 <X class="size-3.5"/>
@@ -1162,9 +1374,9 @@ where
             if privacy_enabled {
                 let toggle_value = text.clone();
                 let class = if revealed {
-                    "inline-block max-w-full truncate rounded-sm text-left align-baseline transition hover:cursor-pointer focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    "inline-flex max-w-full items-center truncate rounded-sm text-left align-middle leading-none transition hover:cursor-pointer focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 } else {
-                    "inline-block max-w-full truncate rounded-sm text-left align-baseline blur-[3px] transition hover:cursor-pointer focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    "inline-flex max-w-full items-center truncate rounded-sm text-left align-middle leading-none blur-[3px] transition hover:cursor-pointer focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 };
                 let aria_label = if revealed {
                     "Hide credential"
@@ -1176,6 +1388,7 @@ where
                         class=class
                         type="button"
                         aria-label=aria_label
+                        title=aria_label
                         on:click=move |event| {
                             event.stop_propagation();
                             on_reveal.with_value(|f| f(toggle_value.clone()));
@@ -1187,7 +1400,7 @@ where
                 .into_any()
             } else {
                 view! {
-                    <span class="inline-block max-w-full truncate align-baseline">{text}</span>
+                    <span class="inline-flex max-w-full items-center truncate align-middle leading-none">{text}</span>
                 }
                 .into_any()
             }
@@ -1207,8 +1420,8 @@ fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
     let last_30_days_detail = CostUsageBreakdown::from_daily_points(&usage.daily);
 
     view! {
-        <div class="mb-5 flex items-start gap-2 rounded-md border border-border bg-secondary p-3">
-            <div class="grid min-w-0 flex-1 grid-cols-2 gap-3 max-sm:w-full max-sm:grid-cols-1">
+        <div class="mb-3 flex items-start gap-2 rounded-md border border-border bg-secondary p-2.5">
+            <div class="grid min-w-0 flex-1 grid-cols-2 gap-3">
                 <CostMetric
                     label="Today"
                     tokens=usage.today_tokens
@@ -1243,34 +1456,33 @@ fn CostMetric(
     let tooltip_label = format!("{label} pricing details");
 
     view! {
-        <div class="min-w-0">
-            <div class="flex items-center gap-1.5">
-                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
-                <Tooltip>
-                    <button
-                        class="inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:cursor-pointer hover:bg-accent hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                        type="button"
-                        aria-label=tooltip_label
-                    >
-                        <Info class="size-3"/>
-                    </button>
-                    <TooltipContent
-                        class="w-52 whitespace-normal text-left leading-5"
-                        position=TooltipPosition::Bottom
-                    >
-                        <div class="grid gap-1">
-                            <p class="font-medium">"Pricing details"</p>
-                            <p>{input_detail}</p>
-                            <p>{output_detail}</p>
-                            <p>{total_detail}</p>
-                        </div>
-                    </TooltipContent>
-                </Tooltip>
+        <div class="flex min-w-0 items-center gap-2 whitespace-nowrap">
+            <p class="shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+            <div class="flex min-w-0 items-baseline gap-2">
+                <strong class="shrink-0 text-sm font-semibold leading-none">{format_cost(cost)}</strong>
+                <span class="min-w-0 truncate text-xs text-muted-foreground">{format_tokens(tokens)}</span>
             </div>
-            <div class="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                <strong class="text-sm font-semibold leading-none">{format_cost(cost)}</strong>
-                <span class="text-xs text-muted-foreground">{format_tokens(tokens)}</span>
-            </div>
+            <Tooltip class="shrink-0">
+                <button
+                    class="inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:cursor-pointer hover:bg-accent hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    type="button"
+                    aria-label=tooltip_label
+                >
+                    <Info class="size-3"/>
+                </button>
+                <TooltipContent
+                    class="w-52 whitespace-normal text-left leading-5"
+                    position=TooltipPosition::Bottom
+                    align=TooltipAlign::Start
+                >
+                    <div class="grid gap-1">
+                        <p class="font-medium">"Pricing details"</p>
+                        <p>{input_detail.clone()}</p>
+                        <p>{output_detail.clone()}</p>
+                        <p>{total_detail.clone()}</p>
+                    </div>
+                </TooltipContent>
+            </Tooltip>
         </div>
     }
 }
@@ -1342,12 +1554,15 @@ where
     let secondary = move || usage.with_value(|f| f().and_then(|s| s.secondary));
     let credits = move || usage.with_value(|f| f().and_then(|s| s.credits));
     let has_usage = move || usage.with_value(|f| f().is_some());
+    let has_weekly_window = move || usage.with_value(|f| f().and_then(|s| s.secondary).is_some());
+    let weekly_estimate =
+        move || usage.with_value(|f| f().and_then(|snapshot| weekly_runway_estimate(&snapshot)));
 
     view! {
         <Card size=CardSize::Sm class="border-0 shadow-none">
-            <div class="flex items-start justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
-                <div class="flex min-w-0 items-baseline gap-2">
-                    <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">
+            <div class="flex items-center justify-between gap-3">
+                <div class="flex min-w-0 flex-wrap items-center gap-2">
+                    <h2 class="flex h-5 min-w-0 items-center truncate font-mono text-sm font-medium leading-none tracking-normal">
                         <CredentialText
                             value=label_call
                             hide_credentials=move || hide_credentials.with_value(|f| f())
@@ -1356,43 +1571,55 @@ where
                         />
                     </h2>
                     {move || is_live_system_call().then(|| view! {
-                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="h-5 shrink-0 leading-none uppercase tracking-wide">
                             "System"
                         </Badge>
                     })}
                     {move || plan_label().map(|plan| view! {
-                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="h-5 shrink-0 leading-none uppercase tracking-wide">
                             {plan}
                         </Badge>
                     })}
                     {move || usage_source().map(|source| view! {
-                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="h-5 shrink-0 leading-none uppercase tracking-wide">
                             {source}
                         </Badge>
                     })}
                 </div>
-                <div class="flex items-center gap-2 max-sm:justify-end">
+                <div class="flex shrink-0 items-center gap-2">
                     {move || can_set_system_call().then(|| view! {
+                        <Tooltip>
                         <button
                             class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("")
                             type="button"
+                            aria-label="Set as system account"
                             disabled=move || disabled_for_set_system.with_value(|f| f())
                             on:click=move |_| on_set_system.with_value(|f| f())
                         >
                             "Set as System"
                         </button>
+                            <TooltipContent position=TooltipPosition::Bottom>
+                                "Set as system account"
+                            </TooltipContent>
+                        </Tooltip>
                     })}
                     {move || reauth_required_call().then(|| {
                         let trigger = move |_| on_reauth.with_value(|f| f());
                         view! {
+                            <Tooltip>
                             <button
                                 class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("")
                                 type="button"
+                                aria-label="Re-authenticate account"
                                 disabled=move || disabled_for_reauth.with_value(|f| f())
                                 on:click=trigger
                             >
                                 "Re-auth"
                             </button>
+                                <TooltipContent position=TooltipPosition::Bottom>
+                                    "Re-authenticate account"
+                                </TooltipContent>
+                            </Tooltip>
                         }
                     })}
                     {move || (is_managed_call() && can_remove_call()).then(|| view! {
@@ -1439,6 +1666,23 @@ where
                 }}
             </div>
 
+            {move || {
+                weekly_estimate()
+                    .map(|estimate| view! { <UsageRunway estimate=estimate/> }.into_any())
+                    .unwrap_or_else(|| {
+                        if has_usage() && has_weekly_window() {
+                            view! {
+                                <p class="text-[11px] font-medium text-muted-foreground">
+                                    "Weekly estimate unavailable"
+                                </p>
+                            }
+                            .into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
+                    })
+            }}
+
             {move || credits().and_then(render_credits)}
 
             {move || error.with_value(|f| f()).map(|message| view! {
@@ -1475,7 +1719,7 @@ fn UsageMeter(window: UsageWindow) -> impl IntoView {
             >
                 <div class=fill_class style=width></div>
             </div>
-            <div class="flex justify-between gap-3 text-[11px] text-muted-foreground max-sm:flex-col">
+            <div class="flex justify-between gap-3 text-[11px] text-muted-foreground">
                 <span>{format!("{:.0}% remaining", window.remaining_percent.clamp(0.0, 100.0))}</span>
                 <span>{reset}</span>
             </div>
@@ -1499,4 +1743,136 @@ fn render_credits(credits: CreditsSnapshot) -> Option<impl IntoView> {
             {label}
         </Badge>
     })
+}
+
+fn weekly_runway_estimate(usage: &UsageSnapshot) -> Option<UsageRunwayEstimate> {
+    usage.secondary.as_ref().and_then(weekly_window_estimate)
+}
+
+fn weekly_window_estimate(window: &UsageWindow) -> Option<UsageRunwayEstimate> {
+    let reset_at = window.reset_at?;
+    let window_seconds = window.window_seconds.unwrap_or(7 * 86_400);
+    if window_seconds <= 0 {
+        return None;
+    }
+
+    let used_percent = finite_percent(window.used_percent)?;
+    if used_percent <= 0.0 {
+        return None;
+    }
+
+    let remaining_percent = finite_percent(window.remaining_percent)?;
+    let now = js_sys::Date::now() / 1000.0;
+    let reset_at = reset_at as f64;
+    if reset_at <= now {
+        return None;
+    }
+
+    let start_at = reset_at - window_seconds as f64;
+    let elapsed_seconds = (now - start_at).clamp(60.0, window_seconds as f64);
+    let elapsed_days = elapsed_seconds / SECONDS_PER_DAY;
+    if elapsed_days <= 0.0 {
+        return None;
+    }
+
+    let rate_percent_per_day = used_percent / elapsed_days;
+    if !rate_percent_per_day.is_finite() || rate_percent_per_day <= 0.0 {
+        return None;
+    }
+
+    let days_until_limit = remaining_percent / rate_percent_per_day;
+    if !days_until_limit.is_finite() || days_until_limit < 0.0 {
+        return None;
+    }
+
+    Some(UsageRunwayEstimate {
+        rate_percent_per_day,
+        days_until_limit,
+    })
+}
+
+fn auto_switch_runway_estimate(
+    accounts: &[AccountSummary],
+    usage_by_id: &HashMap<String, UsageSnapshot>,
+    errors_by_id: &HashMap<String, String>,
+) -> Option<AutoSwitchRunwayEstimate> {
+    let managed_accounts = accounts
+        .iter()
+        .filter(|account| {
+            account.source == AccountSourceKind::Managed && !errors_by_id.contains_key(&account.id)
+        })
+        .collect::<Vec<_>>();
+
+    if managed_accounts.is_empty() {
+        return None;
+    }
+
+    let total_remaining = managed_accounts
+        .iter()
+        .filter_map(|account| usage_by_id.get(&account.id))
+        .filter_map(|usage| usage.secondary.as_ref())
+        .filter_map(|window| finite_percent(window.remaining_percent))
+        .sum::<f64>();
+
+    if total_remaining <= 0.0 {
+        return None;
+    }
+
+    let active_rate = accounts
+        .iter()
+        .find(|account| {
+            account.is_live_system
+                && account.source == AccountSourceKind::Managed
+                && !errors_by_id.contains_key(&account.id)
+        })
+        .and_then(|account| usage_by_id.get(&account.id))
+        .and_then(weekly_runway_estimate)
+        .map(|estimate| estimate.rate_percent_per_day);
+
+    let rate_percent_per_day = active_rate.or_else(|| {
+        let rates = managed_accounts
+            .iter()
+            .filter_map(|account| usage_by_id.get(&account.id))
+            .filter_map(weekly_runway_estimate)
+            .map(|estimate| estimate.rate_percent_per_day)
+            .collect::<Vec<_>>();
+
+        (!rates.is_empty()).then(|| rates.iter().sum::<f64>() / rates.len() as f64)
+    })?;
+
+    if !rate_percent_per_day.is_finite() || rate_percent_per_day <= 0.0 {
+        return None;
+    }
+
+    Some(AutoSwitchRunwayEstimate {
+        days_until_limit: total_remaining / rate_percent_per_day,
+        account_count: managed_accounts.len(),
+    })
+}
+
+fn finite_percent(value: f64) -> Option<f64> {
+    value.is_finite().then(|| value.clamp(0.0, 100.0))
+}
+
+fn format_usage_days(days: f64) -> String {
+    if !days.is_finite() {
+        return "n/a".to_string();
+    }
+
+    if days < 0.1 {
+        "<0.1 day".to_string()
+    } else {
+        let rounded = if days < 10.0 {
+            (days * 10.0).round() / 10.0
+        } else {
+            days.round()
+        };
+        let amount = if rounded < 10.0 && rounded.fract() != 0.0 {
+            format!("{rounded:.1}")
+        } else {
+            format!("{rounded:.0}")
+        };
+        let unit = if amount == "1" { "day" } else { "days" };
+        format!("{amount} {unit}")
+    }
 }

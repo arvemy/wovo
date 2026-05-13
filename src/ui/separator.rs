@@ -20,6 +20,6 @@ pub fn Separator(
     };
     let merged = tw_merge!("shrink-0 bg-border", orientation_class, class);
     view! {
-        <div role="separator" aria-orientation=aria_orientation class=merged />
+        <div data-name="Separator" role="separator" aria-orientation=aria_orientation class=merged />
     }
 }

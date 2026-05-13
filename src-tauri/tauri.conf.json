@@ -15,7 +15,9 @@
       {
         "title": "wovo",
         "width": 900,
-        "height": 720
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 520
       }
     ],
     "security": {

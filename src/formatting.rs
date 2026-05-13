@@ -63,11 +63,11 @@ pub(crate) fn quota_event_meta_suffix(event: &QuotaEvent) -> String {
 
 pub(crate) fn usage_meter_fill_class(used_percent: f64) -> &'static str {
     if used_percent >= 100.0 {
-        "h-full min-w-0.5 rounded-full bg-[var(--critical)] transition-all duration-300 ease-in-out"
+        "h-full min-w-0.5 rounded-full bg-[var(--critical)] transition-colors duration-300 ease-in-out"
     } else if used_percent >= 80.0 {
-        "h-full min-w-0.5 rounded-full bg-[var(--warning)] transition-all duration-300 ease-in-out"
+        "h-full min-w-0.5 rounded-full bg-[var(--warning)] transition-colors duration-300 ease-in-out"
     } else {
-        "h-full min-w-0.5 rounded-full bg-[var(--success)] transition-all duration-300 ease-in-out"
+        "h-full min-w-0.5 rounded-full bg-[var(--success)] transition-colors duration-300 ease-in-out"
     }
 }
 

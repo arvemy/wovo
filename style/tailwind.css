@@ -108,9 +108,10 @@
 
 html,
 body {
-  min-width: 320px;
+  min-width: 640px;
   min-height: 100vh;
   margin: 0;
+  overflow: hidden;
   color: var(--foreground);
   background: var(--background);
   font-family: var(--font-sans);
@@ -118,5 +119,30 @@ body {
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+}
+
+.app-shell {
+  max-height: 100vh;
+}
+
+.codex-page {
+  container-type: inline-size;
+  scrollbar-gutter: stable;
+}
+
+@media (max-height: 680px), (max-width: 760px) {
+  .app-shell {
+    gap: 0.5rem;
+    padding: 0.5rem;
+  }
+
+  .codex-page [data-name='Card'][data-size='sm'] {
+    gap: 0.5rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .codex-page [data-name='Separator'] {
+    margin-block: -0.125rem;
+  }
+
 }

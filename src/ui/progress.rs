@@ -19,7 +19,7 @@ pub fn Progress(
     view! {
         <div role="progressbar" class=merged_class>
             <div
-                class="flex-1 w-full h-full transition-all duration-300 ease-in-out bg-primary"
+                class="flex-1 w-full h-full transition-transform duration-300 ease-in-out bg-primary"
                 style=style
             />
         </div>

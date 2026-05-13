@@ -46,18 +46,19 @@ pub(crate) fn run() {
 
 #[cfg(desktop)]
 fn configure_window_icon<R: tauri::Runtime>(app: &tauri::App<R>) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-
-    if let Ok(theme) = window.theme() {
-        apply_window_icon_for_theme(&window, theme);
+    for window in app.webview_windows().values().cloned() {
+        configure_webview_window_icon(window);
     }
+}
+
+#[cfg(desktop)]
+fn configure_webview_window_icon<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
+    apply_webview_window_icon_for_current_theme(&window);
 
     let window_for_event = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::ThemeChanged(theme) = event {
-            apply_window_icon_for_theme(&window_for_event, *theme);
+            apply_webview_window_icon_for_theme(&window_for_event, *theme);
         }
     });
 }
@@ -66,16 +67,29 @@ fn configure_window_icon<R: tauri::Runtime>(app: &tauri::App<R>) {
 fn configure_window_icon<R: tauri::Runtime>(_app: &tauri::App<R>) {}
 
 #[cfg(desktop)]
-fn apply_window_icon_for_theme<R: tauri::Runtime>(
+fn apply_webview_window_icon_for_current_theme<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
-    theme: tauri::Theme,
 ) {
+    let theme = window.theme().unwrap_or(tauri::Theme::Light);
+    apply_webview_window_icon_for_theme(window, theme);
+}
+
+#[cfg(desktop)]
+fn icon_for_theme(theme: tauri::Theme) -> Option<tauri::image::Image<'static>> {
     let icon_bytes = match theme {
         tauri::Theme::Dark => WOVO_DARK_WINDOW_ICON,
         _ => WOVO_LIGHT_WINDOW_ICON,
     };
 
-    if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
+    tauri::image::Image::from_bytes(icon_bytes).ok()
+}
+
+#[cfg(desktop)]
+fn apply_webview_window_icon_for_theme<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    theme: tauri::Theme,
+) {
+    if let Some(icon) = icon_for_theme(theme) {
         let _ = window.set_icon(icon);
     }
 }
