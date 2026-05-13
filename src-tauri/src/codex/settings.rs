@@ -17,12 +17,16 @@ pub enum CodexUsageSourceMode {
     Cli,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSettings {
     pub usage_source_mode: CodexUsageSourceMode,
     pub cost_usage_enabled: bool,
     pub notifications_enabled: bool,
+    pub auto_account_switching_enabled: bool,
+    pub hide_account_credentials: bool,
+    pub auto_switch_threshold_percent: f64,
+    pub weekly_penalty_threshold: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +38,14 @@ struct StoredCodexSettings {
     cost_usage_enabled: Option<bool>,
     #[serde(default)]
     notifications_enabled: Option<bool>,
+    #[serde(default)]
+    auto_account_switching_enabled: Option<bool>,
+    #[serde(default)]
+    hide_account_credentials: Option<bool>,
+    #[serde(default)]
+    auto_switch_threshold_percent: Option<f64>,
+    #[serde(default)]
+    weekly_penalty_threshold: Option<f64>,
 }
 
 impl Default for CodexSettings {
@@ -42,7 +54,19 @@ impl Default for CodexSettings {
             usage_source_mode: CodexUsageSourceMode::Auto,
             cost_usage_enabled: false,
             notifications_enabled: true,
+            auto_account_switching_enabled: false,
+            hide_account_credentials: false,
+            auto_switch_threshold_percent: 90.0,
+            weekly_penalty_threshold: 20.0,
         }
+    }
+}
+
+fn clean_percent(value: f64, default: f64, min: f64, max: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        default
     }
 }
 
@@ -67,6 +91,34 @@ pub fn save_cost_usage_enabled(enabled: bool) -> Result<CodexSettings, AppError>
 pub fn save_notifications_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
     let mut settings = load_settings()?;
     settings.notifications_enabled = enabled;
+    save_settings_to_path(&settings_path(), &settings)?;
+    Ok(settings)
+}
+
+pub fn save_auto_account_switching_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
+    let mut settings = load_settings()?;
+    settings.auto_account_switching_enabled = enabled;
+    save_settings_to_path(&settings_path(), &settings)?;
+    Ok(settings)
+}
+
+pub fn save_hide_account_credentials(enabled: bool) -> Result<CodexSettings, AppError> {
+    let mut settings = load_settings()?;
+    settings.hide_account_credentials = enabled;
+    save_settings_to_path(&settings_path(), &settings)?;
+    Ok(settings)
+}
+
+pub fn save_auto_switch_threshold_percent(value: f64) -> Result<CodexSettings, AppError> {
+    let mut settings = load_settings()?;
+    settings.auto_switch_threshold_percent = clean_percent(value, 90.0, 50.0, 100.0);
+    save_settings_to_path(&settings_path(), &settings)?;
+    Ok(settings)
+}
+
+pub fn save_weekly_penalty_threshold(value: f64) -> Result<CodexSettings, AppError> {
+    let mut settings = load_settings()?;
+    settings.weekly_penalty_threshold = clean_percent(value, 20.0, 0.0, 50.0);
     save_settings_to_path(&settings_path(), &settings)?;
     Ok(settings)
 }
@@ -100,6 +152,20 @@ fn load_settings_from_path_with_codex_home(
             .cost_usage_enabled
             .unwrap_or_else(|| cost_usage::local_codex_logs_exist(codex_home)),
         notifications_enabled: stored.notifications_enabled.unwrap_or(true),
+        auto_account_switching_enabled: stored.auto_account_switching_enabled.unwrap_or(false),
+        hide_account_credentials: stored.hide_account_credentials.unwrap_or(false),
+        auto_switch_threshold_percent: clean_percent(
+            stored.auto_switch_threshold_percent.unwrap_or(90.0),
+            90.0,
+            50.0,
+            100.0,
+        ),
+        weekly_penalty_threshold: clean_percent(
+            stored.weekly_penalty_threshold.unwrap_or(20.0),
+            20.0,
+            0.0,
+            50.0,
+        ),
     })
 }
 
@@ -146,6 +212,8 @@ mod tests {
 
         assert_eq!(settings.usage_source_mode, CodexUsageSourceMode::Auto);
         assert!(!settings.cost_usage_enabled);
+        assert!(!settings.auto_account_switching_enabled);
+        assert!(!settings.hide_account_credentials);
     }
 
     #[test]
@@ -167,6 +235,10 @@ mod tests {
             usage_source_mode: CodexUsageSourceMode::Cli,
             cost_usage_enabled: true,
             notifications_enabled: false,
+            auto_account_switching_enabled: true,
+            hide_account_credentials: true,
+            auto_switch_threshold_percent: 80.0,
+            weekly_penalty_threshold: 15.0,
         };
 
         save_settings_to_path(&path, &settings).unwrap();
@@ -188,6 +260,8 @@ mod tests {
 
         assert_eq!(loaded.usage_source_mode, CodexUsageSourceMode::Oauth);
         assert!(!loaded.cost_usage_enabled);
+        assert!(!loaded.auto_account_switching_enabled);
+        assert!(!loaded.hide_account_credentials);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

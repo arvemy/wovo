@@ -15,8 +15,11 @@ use codex::snapshot_cache;
 use codex::token_refresh;
 use codex::usage_fetcher;
 use codex::workspace_resolver::{self, WorkspaceResolution};
-use domain::account::AccountSummary;
-use domain::usage::{CodexOverviewSnapshot, CostUsageSnapshot, QuotaEvent, UsageSnapshot};
+use domain::account::{AccountSourceKind, AccountSummary};
+use domain::usage::{
+    CodexOverviewSnapshot, CostUsageSnapshot, QuotaEvent, QuotaEventKind, UsageSnapshot,
+    UsageWindow,
+};
 use error::AppError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -61,6 +64,26 @@ fn set_codex_cost_usage_enabled(enabled: bool) -> Result<CodexSettings, AppError
 #[tauri::command]
 fn set_codex_notifications_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
     settings::save_notifications_enabled(enabled)
+}
+
+#[tauri::command]
+fn set_codex_auto_account_switching_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
+    settings::save_auto_account_switching_enabled(enabled)
+}
+
+#[tauri::command]
+fn set_codex_hide_account_credentials(enabled: bool) -> Result<CodexSettings, AppError> {
+    settings::save_hide_account_credentials(enabled)
+}
+
+#[tauri::command]
+fn set_codex_auto_switch_threshold_percent(value: f64) -> Result<CodexSettings, AppError> {
+    settings::save_auto_switch_threshold_percent(value)
+}
+
+#[tauri::command]
+fn set_codex_weekly_penalty_threshold(value: f64) -> Result<CodexSettings, AppError> {
+    settings::save_weekly_penalty_threshold(value)
 }
 
 #[tauri::command]
@@ -141,7 +164,7 @@ impl CodexSnapshotCoordinator {
             .or_else(snapshot_cache::load_snapshot);
         let settings = settings::load_settings()?;
         let mode = settings.usage_source_mode;
-        let accounts = list_codex_accounts(app.clone()).await?;
+        let mut accounts = list_codex_accounts(app.clone()).await?;
         let mut usage_by_account_id = HashMap::new();
         let mut errors_by_account_id = HashMap::new();
 
@@ -161,6 +184,43 @@ impl CodexSnapshotCoordinator {
                 }
             }
         }
+
+        let auto_switch_notification = if settings.auto_account_switching_enabled {
+            match auto_switch_candidate(
+                &accounts,
+                &usage_by_account_id,
+                &errors_by_account_id,
+                &settings,
+            ) {
+                Some(candidate) => {
+                    let latest_settings = settings::load_settings()?;
+                    if !latest_settings.auto_account_switching_enabled {
+                        None
+                    } else {
+                        match set_system_codex_account_in_store(
+                            &managed_account_store(app)?,
+                            &candidate.target_account_id,
+                            &system_codex_home_path(),
+                        ) {
+                            Ok(_) => {
+                                accounts = list_codex_accounts(app.clone()).await?;
+                                Some(candidate.notification)
+                            }
+                            Err(error) => {
+                                errors_by_account_id.insert(
+                                    candidate.current_account_id,
+                                    format!("Auto switch failed: {error}"),
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
 
         let (cost_usage, cost_error) = self
             .refresh_cost_usage_if_needed(
@@ -187,7 +247,13 @@ impl CodexSnapshotCoordinator {
             codex::quota_events::detect_quota_events(previous.as_ref(), &snapshot);
 
         self.store_and_emit(app, snapshot.clone()).await;
-        send_quota_notifications(app, &snapshot.quota_events, settings.notifications_enabled);
+        send_codex_notifications(
+            app,
+            &snapshot.quota_events,
+            auto_switch_notification.as_ref(),
+            settings.notifications_enabled,
+            settings.hide_account_credentials,
+        );
         let _ = snapshot_cache::save_snapshot(&snapshot);
         Ok(snapshot)
     }
@@ -437,8 +503,229 @@ fn oauth_error_allows_cli_fallback(error: &AppError) -> bool {
     }
 }
 
-fn send_quota_notifications(app: &AppHandle, events: &[QuotaEvent], enabled: bool) {
-    if !enabled || events.is_empty() {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageWindowKey {
+    Primary,
+    Secondary,
+}
+
+impl UsageWindowKey {
+    fn all() -> [Self; 2] {
+        [Self::Primary, Self::Secondary]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexNotification {
+    title: String,
+    body: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AutoSwitchNotification {
+    current_account_label: String,
+    target_account_label: String,
+    window_label: String,
+    threshold_percent: f64,
+    target_primary_remaining: f64,
+    target_weekly_remaining: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AutoSwitchCandidate {
+    current_account_id: String,
+    target_account_id: String,
+    notification: AutoSwitchNotification,
+}
+
+struct ScoredCandidate<'a> {
+    account: &'a AccountSummary,
+    score: f64,
+    primary_remaining: f64,
+    weekly_remaining: f64,
+}
+
+fn compute_switch_score(
+    usage: &UsageSnapshot,
+    now_secs: i64,
+    weekly_penalty_threshold: f64,
+) -> (f64, f64, f64) {
+    let primary_remaining = usage
+        .primary
+        .as_ref()
+        .map(|w| normalized_percent(w.remaining_percent))
+        .unwrap_or(0.0);
+
+    let weekly_remaining_opt = usage
+        .secondary
+        .as_ref()
+        .map(|w| normalized_percent(w.remaining_percent));
+    let weekly_remaining = weekly_remaining_opt.unwrap_or(100.0);
+
+    let weekly_multiplier = if weekly_penalty_threshold <= 0.0 {
+        1.0
+    } else {
+        let t = weekly_penalty_threshold;
+        if weekly_remaining <= t * 0.10 {
+            0.0
+        } else if weekly_remaining <= t * 0.25 {
+            0.20
+        } else if weekly_remaining <= t * 0.50 {
+            0.40
+        } else if weekly_remaining < t {
+            0.60
+        } else {
+            1.0
+        }
+    };
+
+    let weekly_tiebreaker = weekly_remaining_opt
+        .map(|w| w * 0.05 * (primary_remaining / 100.0))
+        .unwrap_or(0.0);
+
+    let reset_bonus = usage
+        .primary
+        .as_ref()
+        .and_then(|w| w.reset_at)
+        .filter(|&reset_at| reset_at > now_secs)
+        .map(|reset_at| {
+            let secs_left = (reset_at - now_secs) as f64;
+            let fraction = 1.0 - (secs_left / 18_000.0).min(1.0);
+            fraction * 5.0
+        })
+        .unwrap_or(0.0);
+
+    let score = primary_remaining * weekly_multiplier + weekly_tiebreaker + reset_bonus;
+    (score, primary_remaining, weekly_remaining)
+}
+
+fn auto_switch_candidate(
+    accounts: &[AccountSummary],
+    usage_by_account_id: &HashMap<String, UsageSnapshot>,
+    errors_by_account_id: &HashMap<String, String>,
+    settings: &CodexSettings,
+) -> Option<AutoSwitchCandidate> {
+    let current = accounts
+        .iter()
+        .find(|account| account.is_live_system && account.source == AccountSourceKind::Managed)?;
+    if errors_by_account_id.contains_key(&current.id) {
+        return None;
+    }
+    let current_usage = usage_by_account_id.get(&current.id)?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let trigger_remaining = 100.0 - settings.auto_switch_threshold_percent;
+    let min_target_remaining = trigger_remaining + 5.0;
+
+    for window_key in UsageWindowKey::all() {
+        let trigger_threshold = match window_key {
+            UsageWindowKey::Primary => settings.auto_switch_threshold_percent,
+            UsageWindowKey::Secondary => 100.0,
+        };
+        let candidate_threshold = trigger_threshold;
+
+        let exhausted_window = usage_window_by_key(current_usage, window_key)
+            .filter(|window| normalized_percent(window.used_percent) >= trigger_threshold);
+        let Some(exhausted_window) = exhausted_window else {
+            continue;
+        };
+
+        let mut best_target: Option<ScoredCandidate<'_>> = None;
+        for account in accounts {
+            if account.id == current.id || account.source != AccountSourceKind::Managed {
+                continue;
+            }
+            if errors_by_account_id.contains_key(&account.id) {
+                continue;
+            }
+
+            let Some(usage) = usage_by_account_id.get(&account.id) else {
+                continue;
+            };
+            let Some(window) = usage_window_by_key(usage, window_key) else {
+                continue;
+            };
+
+            let window_used = normalized_percent(window.used_percent);
+            let window_remaining = normalized_percent(window.remaining_percent);
+            let primary_remaining = normalized_percent(
+                usage_window_by_key(usage, UsageWindowKey::Primary)
+                    .map(|w| w.remaining_percent)
+                    .unwrap_or(0.0),
+            );
+            let secondary_remaining = usage_window_by_key(usage, UsageWindowKey::Secondary)
+                .map(|w| normalized_percent(w.remaining_percent));
+
+            if window_used >= candidate_threshold
+                || window_remaining <= 0.0
+                || primary_remaining < min_target_remaining
+                || matches!(secondary_remaining, Some(remaining) if remaining <= 0.0)
+            {
+                continue;
+            }
+
+            let (score, prem, wrem) =
+                compute_switch_score(usage, now_secs, settings.weekly_penalty_threshold);
+
+            match best_target {
+                Some(ref b) if score <= b.score => {}
+                _ => {
+                    best_target = Some(ScoredCandidate {
+                        account,
+                        score,
+                        primary_remaining: prem,
+                        weekly_remaining: wrem,
+                    });
+                }
+            }
+        }
+
+        if let Some(best) = best_target {
+            return Some(AutoSwitchCandidate {
+                current_account_id: current.id.clone(),
+                target_account_id: best.account.id.clone(),
+                notification: AutoSwitchNotification {
+                    current_account_label: current.label.clone(),
+                    target_account_label: best.account.label.clone(),
+                    window_label: exhausted_window.label.clone(),
+                    threshold_percent: trigger_threshold,
+                    target_primary_remaining: best.primary_remaining,
+                    target_weekly_remaining: best.weekly_remaining,
+                },
+            });
+        }
+    }
+
+    None
+}
+
+fn usage_window_by_key(usage: &UsageSnapshot, window_key: UsageWindowKey) -> Option<&UsageWindow> {
+    match window_key {
+        UsageWindowKey::Primary => usage.primary.as_ref(),
+        UsageWindowKey::Secondary => usage.secondary.as_ref(),
+    }
+}
+
+fn normalized_percent(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+fn send_codex_notifications(
+    app: &AppHandle,
+    events: &[QuotaEvent],
+    auto_switch: Option<&AutoSwitchNotification>,
+    enabled: bool,
+    hide_credentials: bool,
+) {
+    if !enabled || (events.is_empty() && auto_switch.is_none()) {
         return;
     }
 
@@ -461,11 +748,76 @@ fn send_quota_notifications(app: &AppHandle, events: &[QuotaEvent], enabled: boo
     }
 
     for event in events {
+        let payload = quota_event_notification(event, hide_credentials);
         let _ = notification
             .builder()
-            .title(event.title.clone())
-            .body(event.body.clone())
+            .title(payload.title)
+            .body(payload.body)
             .show();
+    }
+
+    if let Some(auto_switch) = auto_switch {
+        let payload = auto_switch_notification(auto_switch, hide_credentials);
+        let _ = notification
+            .builder()
+            .title(payload.title)
+            .body(payload.body)
+            .show();
+    }
+}
+
+fn quota_event_notification(event: &QuotaEvent, hide_credentials: bool) -> CodexNotification {
+    if !hide_credentials {
+        return CodexNotification {
+            title: event.title.clone(),
+            body: event.body.clone(),
+        };
+    }
+
+    let body = match event.kind {
+        QuotaEventKind::Warning => format!(
+            "A Codex account's {} is {:.0}% used.",
+            event.window_label,
+            event.used_percent.clamp(0.0, 100.0)
+        ),
+        QuotaEventKind::Reset => format!(
+            "A Codex account's {} dropped to {:.0}% used.",
+            event.window_label,
+            event.used_percent.clamp(0.0, 100.0)
+        ),
+    };
+
+    CodexNotification {
+        title: event.title.clone(),
+        body,
+    }
+}
+
+fn auto_switch_notification(
+    event: &AutoSwitchNotification,
+    hide_credentials: bool,
+) -> CodexNotification {
+    let body = if hide_credentials {
+        format!(
+            "Wovo switched to another Codex account because {} reached the {:.0}% auto-switch threshold.",
+            event.window_label,
+            event.threshold_percent.clamp(0.0, 100.0),
+        )
+    } else {
+        format!(
+            "Wovo switched from {} to {} because {} reached the {:.0}% auto-switch threshold. Target account: {:.0}% 5h, {:.0}% weekly remaining.",
+            event.current_account_label,
+            event.target_account_label,
+            event.window_label,
+            event.threshold_percent.clamp(0.0, 100.0),
+            event.target_primary_remaining,
+            event.target_weekly_remaining,
+        )
+    };
+
+    CodexNotification {
+        title: "Codex account switched".to_string(),
+        body,
     }
 }
 
@@ -1135,9 +1487,13 @@ pub fn run() {
             remove_codex_account,
             refresh_codex_snapshot,
             set_system_codex_account,
+            set_codex_auto_account_switching_enabled,
+            set_codex_auto_switch_threshold_percent,
             set_codex_cost_usage_enabled,
+            set_codex_hide_account_credentials,
             set_codex_notifications_enabled,
             set_codex_usage_source_mode,
+            set_codex_weekly_penalty_threshold,
             refresh_codex_usage,
             refresh_all_usage
         ])
@@ -1217,8 +1573,15 @@ fn start_codex_snapshot_tasks(app: AppHandle, coordinator: Arc<CodexSnapshotCoor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::account::AccountSourceKind;
     use std::fs;
+
+    fn default_switch_settings() -> CodexSettings {
+        CodexSettings {
+            auto_switch_threshold_percent: 100.0,
+            weekly_penalty_threshold: 20.0,
+            ..CodexSettings::default()
+        }
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("wovo-{name}-{}", Uuid::new_v4()));
@@ -1266,6 +1629,72 @@ mod tests {
             updated_at: None,
             last_authenticated_at: None,
         }
+    }
+
+    fn switch_account(
+        id: &str,
+        label: &str,
+        source: AccountSourceKind,
+        is_live_system: bool,
+    ) -> AccountSummary {
+        AccountSummary {
+            id: id.to_string(),
+            label: label.to_string(),
+            email: Some(label.to_string()),
+            provider_account_id: Some(format!("provider-{id}")),
+            workspace_account_id: None,
+            workspace_label: None,
+            home_path: format!("/tmp/{id}"),
+            source,
+            authenticated: true,
+            is_live_system,
+            can_set_system: !is_live_system,
+            can_remove: !is_live_system,
+            created_at: None,
+            updated_at: None,
+            last_authenticated_at: None,
+        }
+    }
+
+    fn usage_for_account(
+        account_id: &str,
+        primary_used: f64,
+        primary_remaining: f64,
+        secondary_used: f64,
+        secondary_remaining: f64,
+    ) -> UsageSnapshot {
+        UsageSnapshot {
+            account_id: account_id.to_string(),
+            source: "oauth".to_string(),
+            plan_type: Some("pro".to_string()),
+            primary: Some(UsageWindow {
+                label: "5h limit".to_string(),
+                used_percent: primary_used,
+                remaining_percent: primary_remaining,
+                reset_at: Some(1),
+                window_seconds: Some(18_000),
+            }),
+            secondary: Some(UsageWindow {
+                label: "Weekly limit".to_string(),
+                used_percent: secondary_used,
+                remaining_percent: secondary_remaining,
+                reset_at: Some(1),
+                window_seconds: Some(604_800),
+            }),
+            credits: None,
+            updated_at: 1,
+        }
+    }
+
+    fn usage_map(usages: Vec<UsageSnapshot>) -> HashMap<String, UsageSnapshot> {
+        usages
+            .into_iter()
+            .map(|usage| (usage.account_id.clone(), usage))
+            .collect()
+    }
+
+    fn no_usage_errors() -> HashMap<String, String> {
+        HashMap::new()
     }
 
     #[test]
@@ -1340,6 +1769,333 @@ mod tests {
         assert!(!oauth_error_allows_cli_fallback(&AppError::TokenRefresh(
             "connection reset".to_string()
         )));
+    }
+
+    #[test]
+    fn auto_switch_candidate_requires_exhausted_live_managed_account() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account(
+                "target",
+                "target@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 99.0, 1.0, 0.0, 100.0),
+            usage_for_account("target", 10.0, 90.0, 0.0, 100.0),
+        ]);
+
+        assert!(auto_switch_candidate(
+            &accounts,
+            &usage,
+            &no_usage_errors(),
+            &default_switch_settings()
+        )
+        .is_none());
+
+        let ambient_accounts = vec![
+            switch_account(
+                "ambient",
+                "ambient@example.com",
+                AccountSourceKind::Ambient,
+                true,
+            ),
+            switch_account(
+                "target",
+                "target@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let ambient_usage = usage_map(vec![
+            usage_for_account("ambient", 100.0, 0.0, 0.0, 100.0),
+            usage_for_account("target", 10.0, 90.0, 0.0, 100.0),
+        ]);
+
+        assert!(auto_switch_candidate(
+            &ambient_accounts,
+            &ambient_usage,
+            &no_usage_errors(),
+            &default_switch_settings()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn auto_switch_candidate_uses_most_remaining_for_same_exhausted_window() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account("low", "low@example.com", AccountSourceKind::Managed, false),
+            switch_account(
+                "high",
+                "high@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 0.0, 100.0, 100.0, 0.0),
+            usage_for_account("low", 0.0, 100.0, 20.0, 80.0),
+            usage_for_account("high", 0.0, 100.0, 10.0, 90.0),
+        ]);
+
+        let candidate = auto_switch_candidate(
+            &accounts,
+            &usage,
+            &no_usage_errors(),
+            &default_switch_settings(),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.current_account_id, "current");
+        assert_eq!(candidate.target_account_id, "high");
+        assert_eq!(candidate.notification.window_label, "Weekly limit");
+    }
+
+    #[test]
+    fn auto_switch_candidate_returns_none_without_eligible_target() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account(
+                "exhausted",
+                "exhausted@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 100.0, 0.0, 0.0, 100.0),
+            usage_for_account("exhausted", 100.0, 0.0, 0.0, 100.0),
+        ]);
+
+        assert!(auto_switch_candidate(
+            &accounts,
+            &usage,
+            &no_usage_errors(),
+            &default_switch_settings()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn auto_switch_candidate_ignores_accounts_with_refresh_errors() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account(
+                "stale",
+                "stale@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+            switch_account(
+                "healthy",
+                "healthy@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 100.0, 0.0, 0.0, 100.0),
+            usage_for_account("stale", 10.0, 90.0, 0.0, 100.0),
+            usage_for_account("healthy", 50.0, 50.0, 0.0, 100.0),
+        ]);
+        let mut target_errors = HashMap::new();
+        target_errors.insert("stale".to_string(), "refresh failed".to_string());
+
+        let candidate = auto_switch_candidate(
+            &accounts,
+            &usage,
+            &target_errors,
+            &default_switch_settings(),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.target_account_id, "healthy");
+
+        let mut current_errors = HashMap::new();
+        current_errors.insert("current".to_string(), "refresh failed".to_string());
+
+        assert!(auto_switch_candidate(
+            &accounts,
+            &usage,
+            &current_errors,
+            &default_switch_settings()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn auto_switch_candidate_rejects_weekly_exhausted_targets() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account(
+                "weekly-exhausted",
+                "weekly-exhausted@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 100.0, 0.0, 0.0, 100.0),
+            usage_for_account("weekly-exhausted", 10.0, 90.0, 100.0, 0.0),
+        ]);
+
+        assert!(auto_switch_candidate(
+            &accounts,
+            &usage,
+            &no_usage_errors(),
+            &default_switch_settings()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn auto_switch_candidate_ties_follow_displayed_order() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account(
+                "first",
+                "first@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+            switch_account(
+                "second",
+                "second@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 100.0, 0.0, 0.0, 100.0),
+            usage_for_account("first", 50.0, 50.0, 0.0, 100.0),
+            usage_for_account("second", 50.0, 50.0, 0.0, 100.0),
+        ]);
+
+        let candidate = auto_switch_candidate(
+            &accounts,
+            &usage,
+            &no_usage_errors(),
+            &default_switch_settings(),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.target_account_id, "first");
+    }
+
+    #[test]
+    fn auto_switch_candidate_skips_non_managed_targets() {
+        let accounts = vec![
+            switch_account(
+                "current",
+                "current@example.com",
+                AccountSourceKind::Managed,
+                true,
+            ),
+            switch_account(
+                "ambient",
+                "ambient@example.com",
+                AccountSourceKind::Ambient,
+                false,
+            ),
+            switch_account(
+                "managed",
+                "managed@example.com",
+                AccountSourceKind::Managed,
+                false,
+            ),
+        ];
+        let usage = usage_map(vec![
+            usage_for_account("current", 100.0, 0.0, 0.0, 100.0),
+            usage_for_account("ambient", 5.0, 95.0, 0.0, 100.0),
+            usage_for_account("managed", 50.0, 50.0, 0.0, 100.0),
+        ]);
+
+        let candidate = auto_switch_candidate(
+            &accounts,
+            &usage,
+            &no_usage_errors(),
+            &default_switch_settings(),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.target_account_id, "managed");
+    }
+
+    #[test]
+    fn credential_hiding_redacts_system_notification_text() {
+        let event = QuotaEvent {
+            id: "event".to_string(),
+            kind: QuotaEventKind::Warning,
+            severity: crate::domain::usage::QuotaEventSeverity::Critical,
+            account_id: "account-1".to_string(),
+            account_label: "user@example.com".to_string(),
+            window_key: "primary".to_string(),
+            window_label: "5h limit".to_string(),
+            used_percent: 100.0,
+            threshold_percent: Some(100.0),
+            title: "Codex quota exhausted".to_string(),
+            body: "user@example.com: 5h limit is 100% used.".to_string(),
+            generated_at: 1,
+        };
+        let switch = AutoSwitchNotification {
+            current_account_label: "user@example.com".to_string(),
+            target_account_label: "other@example.com".to_string(),
+            window_label: "5h limit".to_string(),
+            threshold_percent: 90.0,
+            target_primary_remaining: 40.0,
+            target_weekly_remaining: 75.0,
+        };
+
+        let visible_quota = quota_event_notification(&event, false);
+        let hidden_quota = quota_event_notification(&event, true);
+        let visible_switch = auto_switch_notification(&switch, false);
+        let hidden_switch = auto_switch_notification(&switch, true);
+
+        assert!(visible_quota.body.contains("user@example.com"));
+        assert!(!hidden_quota.body.contains("user@example.com"));
+        assert!(hidden_quota.body.contains("A Codex account"));
+        assert!(visible_switch.body.contains("user@example.com"));
+        assert!(visible_switch.body.contains("other@example.com"));
+        assert!(visible_switch.body.contains("90% auto-switch threshold"));
+        assert!(!visible_switch.body.contains("was exhausted"));
+        assert!(!hidden_switch.body.contains("user@example.com"));
+        assert!(!hidden_switch.body.contains("other@example.com"));
+        assert!(hidden_switch.body.contains("another Codex account"));
+        assert!(hidden_switch.body.contains("90% auto-switch threshold"));
+        assert!(!hidden_switch.body.contains("was exhausted"));
     }
 
     #[test]

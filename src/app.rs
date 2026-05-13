@@ -152,6 +152,19 @@ struct CodexSettings {
     usage_source_mode: CodexUsageSourceMode,
     cost_usage_enabled: bool,
     notifications_enabled: bool,
+    auto_account_switching_enabled: bool,
+    hide_account_credentials: bool,
+    #[serde(default = "default_auto_switch_threshold")]
+    auto_switch_threshold_percent: f64,
+    #[serde(default = "default_weekly_penalty_threshold")]
+    weekly_penalty_threshold: f64,
+}
+
+fn default_auto_switch_threshold() -> f64 {
+    90.0
+}
+fn default_weekly_penalty_threshold() -> f64 {
+    20.0
 }
 
 #[derive(Serialize)]
@@ -170,6 +183,30 @@ struct SetCostUsageEnabledArgs {
 #[serde(rename_all = "camelCase")]
 struct SetNotificationsEnabledArgs {
     enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetAutoAccountSwitchingEnabledArgs {
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetHideAccountCredentialsArgs {
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetAutoSwitchThresholdArgs {
+    value: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetWeeklyPenaltyThresholdArgs {
+    value: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -264,6 +301,11 @@ pub fn App() -> impl IntoView {
     let (theme_mode, set_theme_mode) = signal(initial_theme_mode);
     let (cost_usage_enabled, set_cost_usage_enabled) = signal(false);
     let (notifications_enabled, set_notifications_enabled) = signal(true);
+    let (auto_account_switching_enabled, set_auto_account_switching_enabled) = signal(false);
+    let (hide_account_credentials, set_hide_account_credentials) = signal(true);
+    let (auto_switch_threshold, set_auto_switch_threshold) = signal::<f64>(90.0);
+    let (weekly_penalty_threshold, set_weekly_penalty_threshold) = signal::<f64>(20.0);
+    let (revealed_credential, set_revealed_credential) = signal::<Option<String>>(None);
     let (is_menu_open, set_is_menu_open) = signal(false);
     let (cost_usage, set_cost_usage) = signal::<Option<CostUsageSnapshot>>(None);
     let (cost_error, set_cost_error) = signal::<Option<String>>(None);
@@ -273,6 +315,16 @@ pub fn App() -> impl IntoView {
     let (is_listing, set_is_listing) = signal(true);
     let (is_account_action_loading, set_is_account_action_loading) = signal(false);
     let (global_error, set_global_error) = signal::<Option<String>>(None);
+
+    let apply_settings = move |settings: CodexSettings| {
+        set_usage_source_mode.set(settings.usage_source_mode);
+        set_cost_usage_enabled.set(settings.cost_usage_enabled);
+        set_notifications_enabled.set(settings.notifications_enabled);
+        set_auto_account_switching_enabled.set(settings.auto_account_switching_enabled);
+        set_hide_account_credentials.set(settings.hide_account_credentials);
+        set_auto_switch_threshold.set(settings.auto_switch_threshold_percent);
+        set_weekly_penalty_threshold.set(settings.weekly_penalty_threshold);
+    };
 
     let apply_snapshot = move |snapshot: CodexOverviewSnapshot| {
         let next_ids: HashSet<String> = snapshot
@@ -351,9 +403,7 @@ pub fn App() -> impl IntoView {
             set_is_settings_loading.set(true);
             match invoke_tauri::<CodexSettings>("get_codex_settings", JsValue::UNDEFINED).await {
                 Ok(settings) => {
-                    set_usage_source_mode.set(settings.usage_source_mode);
-                    set_cost_usage_enabled.set(settings.cost_usage_enabled);
-                    set_notifications_enabled.set(settings.notifications_enabled);
+                    apply_settings(settings);
                 }
                 Err(error) => set_global_error.set(Some(error.message)),
             }
@@ -390,9 +440,7 @@ pub fn App() -> impl IntoView {
                 Ok(args) => {
                     match invoke_tauri::<CodexSettings>("set_codex_usage_source_mode", args).await {
                         Ok(settings) => {
-                            set_usage_source_mode.set(settings.usage_source_mode);
-                            set_cost_usage_enabled.set(settings.cost_usage_enabled);
-                            set_notifications_enabled.set(settings.notifications_enabled);
+                            apply_settings(settings);
                             refresh_overview_snapshot(true);
                         }
                         Err(error) => {
@@ -432,9 +480,7 @@ pub fn App() -> impl IntoView {
                     match invoke_tauri::<CodexSettings>("set_codex_cost_usage_enabled", args).await
                     {
                         Ok(settings) => {
-                            set_usage_source_mode.set(settings.usage_source_mode);
-                            set_cost_usage_enabled.set(settings.cost_usage_enabled);
-                            set_notifications_enabled.set(settings.notifications_enabled);
+                            apply_settings(settings);
                             refresh_overview_snapshot(true);
                         }
                         Err(error) => {
@@ -471,9 +517,7 @@ pub fn App() -> impl IntoView {
                         .await
                     {
                         Ok(settings) => {
-                            set_usage_source_mode.set(settings.usage_source_mode);
-                            set_cost_usage_enabled.set(settings.cost_usage_enabled);
-                            set_notifications_enabled.set(settings.notifications_enabled);
+                            apply_settings(settings);
                         }
                         Err(error) => {
                             set_notifications_enabled.set(previous);
@@ -483,6 +527,170 @@ pub fn App() -> impl IntoView {
                 }
                 Err(error) => {
                     set_notifications_enabled.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    let change_auto_account_switching_enabled = move |enabled: bool| {
+        if enabled == auto_account_switching_enabled.get_untracked() {
+            return;
+        }
+        let previous = auto_account_switching_enabled.get_untracked();
+        set_auto_account_switching_enabled.set(enabled);
+
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args =
+                serde_wasm_bindgen::to_value(&SetAutoAccountSwitchingEnabledArgs { enabled })
+                    .map_err(|error| CommandError::from_message(error.to_string()));
+
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>(
+                        "set_codex_auto_account_switching_enabled",
+                        args,
+                    )
+                    .await
+                    {
+                        Ok(settings) => {
+                            apply_settings(settings);
+                            if enabled {
+                                refresh_overview_snapshot(true);
+                            }
+                        }
+                        Err(error) => {
+                            set_auto_account_switching_enabled.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_auto_account_switching_enabled.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    let change_hide_account_credentials = move |enabled: bool| {
+        if enabled == hide_account_credentials.get_untracked() {
+            return;
+        }
+        let previous = hide_account_credentials.get_untracked();
+        set_hide_account_credentials.set(enabled);
+        if enabled {
+            set_revealed_credential.set(None);
+        }
+
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args = serde_wasm_bindgen::to_value(&SetHideAccountCredentialsArgs { enabled })
+                .map_err(|error| CommandError::from_message(error.to_string()));
+
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>("set_codex_hide_account_credentials", args)
+                        .await
+                    {
+                        Ok(settings) => {
+                            let hide_enabled = settings.hide_account_credentials;
+                            apply_settings(settings);
+                            if hide_enabled {
+                                set_revealed_credential.set(None);
+                            }
+                        }
+                        Err(error) => {
+                            set_hide_account_credentials.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_hide_account_credentials.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    let change_auto_switch_threshold = move |value: f64| {
+        let clamped = if value.is_finite() {
+            value.clamp(50.0, 100.0)
+        } else {
+            90.0
+        };
+        if clamped == auto_switch_threshold.get_untracked() {
+            return;
+        }
+        let previous = auto_switch_threshold.get_untracked();
+        set_auto_switch_threshold.set(clamped);
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args = serde_wasm_bindgen::to_value(&SetAutoSwitchThresholdArgs { value: clamped })
+                .map_err(|error| CommandError::from_message(error.to_string()));
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>(
+                        "set_codex_auto_switch_threshold_percent",
+                        args,
+                    )
+                    .await
+                    {
+                        Ok(settings) => apply_settings(settings),
+                        Err(error) => {
+                            set_auto_switch_threshold.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_auto_switch_threshold.set(previous);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+            set_is_settings_loading.set(false);
+        });
+    };
+
+    let change_weekly_penalty_threshold = move |value: f64| {
+        let clamped = if value.is_finite() {
+            value.clamp(0.0, 50.0)
+        } else {
+            20.0
+        };
+        if clamped == weekly_penalty_threshold.get_untracked() {
+            return;
+        }
+        let previous = weekly_penalty_threshold.get_untracked();
+        set_weekly_penalty_threshold.set(clamped);
+        spawn_local(async move {
+            set_is_settings_loading.set(true);
+            set_global_error.set(None);
+            let args =
+                serde_wasm_bindgen::to_value(&SetWeeklyPenaltyThresholdArgs { value: clamped })
+                    .map_err(|error| CommandError::from_message(error.to_string()));
+            match args {
+                Ok(args) => {
+                    match invoke_tauri::<CodexSettings>("set_codex_weekly_penalty_threshold", args)
+                        .await
+                    {
+                        Ok(settings) => apply_settings(settings),
+                        Err(error) => {
+                            set_weekly_penalty_threshold.set(previous);
+                            set_global_error.set(Some(error.message));
+                        }
+                    }
+                }
+                Err(error) => {
+                    set_weekly_penalty_threshold.set(previous);
                     set_global_error.set(Some(error.message));
                 }
             }
@@ -635,13 +843,28 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <main class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-background py-6 text-foreground max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4">
+        <main
+            class="mx-auto min-h-screen w-[min(820px,calc(100vw-2rem))] bg-background py-6 text-foreground max-sm:w-[min(100vw-1.5rem,820px)] max-sm:py-4"
+            on:click=move |_| {
+                if hide_account_credentials.get_untracked() {
+                    set_revealed_credential.set(None);
+                }
+            }
+        >
             <div class="mb-5 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-center gap-3">
                     <img src="/public/openai-black.svg" class="size-12 shrink-0 dark:hidden" alt="Codex"/>
                     <img src="/public/openai-white.svg" class="hidden size-12 shrink-0 dark:block" alt="Codex"/>
                 </div>
                 <div class="flex items-center gap-2 max-sm:justify-end">
+                    <label class="inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground shadow-xs transition-colors hover:bg-accent">
+                        <Checkbox
+                            checked=move || auto_account_switching_enabled.get()
+                            disabled=move || is_settings_loading.get() || any_action_in_flight()
+                            on_change=move |enabled| change_auto_account_switching_enabled(enabled)
+                        />
+                        <span>"Auto switch"</span>
+                    </label>
                     <Tooltip>
                         <button
                             class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
@@ -796,10 +1019,69 @@ pub fn App() -> impl IntoView {
                                         on_change=move |enabled| change_notifications_enabled(enabled)
                                     />
                                     <div>
-                                        <p class="text-sm font-medium leading-none">"Quota notifications"</p>
-                                        <p class="mt-0.5 text-[11px] text-muted-foreground">"System alerts for quota events"</p>
+                                        <p class="text-sm font-medium leading-none">"Notifications"</p>
+                                        <p class="mt-0.5 text-[11px] text-muted-foreground">"Quota and auto-switch alerts"</p>
                                     </div>
                                 </label>
+                                <label class="flex w-full cursor-pointer items-center gap-3 rounded-sm px-2 py-1.5 hover:bg-accent">
+                                    <Checkbox
+                                        checked=move || hide_account_credentials.get()
+                                        disabled=move || is_settings_loading.get()
+                                        on_change=move |enabled| change_hide_account_credentials(enabled)
+                                    />
+                                    <div>
+                                        <p class="text-sm font-medium leading-none">"Hide account credentials"</p>
+                                        <p class="mt-0.5 text-[11px] text-muted-foreground">"Blur account labels"</p>
+                                    </div>
+                                </label>
+                                {move || auto_account_switching_enabled.get().then(|| view! {
+                                    <div class="my-1 h-px bg-border"/>
+                                    <div class="px-2 py-1.5">
+                                        <p class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                            "Auto Switch"
+                                        </p>
+                                        <div class="flex items-center justify-between gap-2 py-1">
+                                            <span class="text-sm font-medium">"Switch when 5h used ≥"</span>
+                                            <div class="flex items-center gap-1">
+                                                <input
+                                                    type="number"
+                                                    min="50"
+                                                    max="100"
+                                                    step="1"
+                                                    class="w-14 rounded border border-border bg-background px-1.5 py-0.5 text-xs text-right"
+                                                    disabled=move || is_settings_loading.get()
+                                                    prop:value=move || auto_switch_threshold.get().to_string()
+                                                    on:change=move |ev| {
+                                                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                                            change_auto_switch_threshold(v);
+                                                        }
+                                                    }
+                                                />
+                                                <span class="text-xs text-muted-foreground">"%"</span>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-center justify-between gap-2 py-1">
+                                            <span class="text-sm font-medium">"Penalise if weekly remaining <"</span>
+                                            <div class="flex items-center gap-1">
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="50"
+                                                    step="1"
+                                                    class="w-14 rounded border border-border bg-background px-1.5 py-0.5 text-xs text-right"
+                                                    disabled=move || is_settings_loading.get()
+                                                    prop:value=move || weekly_penalty_threshold.get().to_string()
+                                                    on:change=move |ev| {
+                                                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                                            change_weekly_penalty_threshold(v);
+                                                        }
+                                                    }
+                                                />
+                                                <span class="text-xs text-muted-foreground">"% (0=off)"</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                })}
                             </div>
                         })}
                     </div>
@@ -852,7 +1134,24 @@ pub fn App() -> impl IntoView {
                                         });
                                     });
                                     view! {
-                                        <QuotaEventCard event=event on_dismiss=dismiss/>
+                                        <QuotaEventCard
+                                            event=event
+                                            hide_credentials=move || hide_account_credentials.get()
+                                            is_credential_revealed=move |value| {
+                                                revealed_credential.with(|current| current.as_deref() == Some(value))
+                                            }
+                                            on_reveal_credential=Box::new(move |value| {
+                                                set_revealed_credential.update(|current| {
+                                                    let already_revealed = current.as_deref() == Some(value.as_str());
+                                                    if already_revealed {
+                                                        *current = None;
+                                                    } else {
+                                                        *current = Some(value);
+                                                    }
+                                                });
+                                            })
+                                            on_dismiss=dismiss
+                                        />
                                     }
                                 }
                             />
@@ -969,6 +1268,20 @@ pub fn App() -> impl IntoView {
                                             is_loading=loading_signal
                                             reauth_required=reauth_signal
                                             disabled=any_action_in_flight
+                                            hide_credentials=move || hide_account_credentials.get()
+                                            is_credential_revealed=move |value| {
+                                                revealed_credential.with(|current| current.as_deref() == Some(value))
+                                            }
+                                            on_reveal_credential=Box::new(move |value| {
+                                                set_revealed_credential.update(|current| {
+                                                    let already_revealed = current.as_deref() == Some(value.as_str());
+                                                    if already_revealed {
+                                                        *current = None;
+                                                    } else {
+                                                        *current = Some(value);
+                                                    }
+                                                });
+                                            })
                                             on_set_system=Box::new(move || set_system_account(id_for_set_system.clone()))
                                             on_remove=Box::new(move || remove_account(id_for_remove.clone()))
                                             on_reauth=Box::new(move || reauthenticate_account(id_for_reauth_action.clone()))
@@ -1001,21 +1314,42 @@ pub fn App() -> impl IntoView {
 }
 
 #[component]
-fn QuotaEventCard(
+fn QuotaEventCard<H, R>(
     event: QuotaEvent,
+    hide_credentials: H,
+    is_credential_revealed: R,
+    on_reveal_credential: Box<dyn Fn(String) + Send + Sync>,
     on_dismiss: Box<dyn Fn(String) + Send + Sync>,
-) -> impl IntoView {
+) -> impl IntoView
+where
+    H: Fn() -> bool + Send + Sync + 'static,
+    R: Fn(&str) -> bool + Send + Sync + 'static,
+{
     let event_id = event.id.clone();
     let event_kind = quota_event_kind_label(&event.kind);
     let event_class = quota_event_class(&event.severity);
-    let meta = quota_event_meta(&event);
-    let detail_title = format!(
+    let body_suffix = quota_event_body_suffix(&event);
+    let meta_suffix = quota_event_meta_suffix(&event);
+    let account_label_for_body = event.account_label.clone();
+    let account_label_for_meta = event.account_label.clone();
+    let full_detail_title = format!(
         "{} - {} - {}",
         event.account_id, event.window_key, event.window_label
     );
+    let redacted_detail_title = format!("{} - {}", event.window_key, event.window_label);
+    let hide_credentials = StoredValue::new(hide_credentials);
+    let is_credential_revealed = StoredValue::new(is_credential_revealed);
+    let on_reveal_credential = StoredValue::new(on_reveal_credential);
 
     view! {
-        <div class=event_class title=detail_title>
+        <div
+            class=event_class
+            title=move || if hide_credentials.with_value(|f| f()) {
+                redacted_detail_title.clone()
+            } else {
+                full_detail_title.clone()
+            }
+        >
             <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
                     <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="rounded-full border-current/30 uppercase tracking-wide">
@@ -1023,8 +1357,24 @@ fn QuotaEventCard(
                     </Badge>
                     <strong class="text-sm font-semibold leading-5">{event.title}</strong>
                 </div>
-                <p class="mt-1 text-xs leading-5">{event.body}</p>
-                <p class="mt-1 text-[11px] opacity-75">{meta}</p>
+                <p class="mt-1 text-xs leading-5">
+                    <CredentialText
+                        value=move || account_label_for_body.clone()
+                        hide_credentials=move || hide_credentials.with_value(|f| f())
+                        is_revealed=move |value| is_credential_revealed.with_value(|f| f(value))
+                        on_reveal=Box::new(move |value| on_reveal_credential.with_value(|f| f(value)))
+                    />
+                    <span>{body_suffix}</span>
+                </p>
+                <p class="mt-1 text-[11px] opacity-75">
+                    <CredentialText
+                        value=move || account_label_for_meta.clone()
+                        hide_credentials=move || hide_credentials.with_value(|f| f())
+                        is_revealed=move |value| is_credential_revealed.with_value(|f| f(value))
+                        on_reveal=Box::new(move |value| on_reveal_credential.with_value(|f| f(value)))
+                    />
+                    <span>{meta_suffix}</span>
+                </p>
             </div>
             <button
                 class="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-sm leading-none opacity-70 hover:cursor-pointer hover:border-current/20 hover:opacity-100"
@@ -1035,6 +1385,65 @@ fn QuotaEventCard(
                 <X class="size-3.5"/>
             </button>
         </div>
+    }
+}
+
+#[component]
+fn CredentialText<T, H, R>(
+    value: T,
+    hide_credentials: H,
+    is_revealed: R,
+    on_reveal: Box<dyn Fn(String) + Send + Sync>,
+) -> impl IntoView
+where
+    T: Fn() -> String + Send + Sync + 'static,
+    H: Fn() -> bool + Send + Sync + 'static,
+    R: Fn(&str) -> bool + Send + Sync + 'static,
+{
+    let value = StoredValue::new(value);
+    let hide_credentials = StoredValue::new(hide_credentials);
+    let is_revealed = StoredValue::new(is_revealed);
+    let on_reveal = StoredValue::new(on_reveal);
+
+    view! {
+        {move || {
+            let text = value.with_value(|f| f());
+            let privacy_enabled = hide_credentials.with_value(|f| f());
+            let revealed = is_revealed.with_value(|f| f(&text));
+
+            if privacy_enabled {
+                let toggle_value = text.clone();
+                let class = if revealed {
+                    "inline-block max-w-full truncate rounded-sm text-left align-baseline transition hover:cursor-pointer focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                } else {
+                    "inline-block max-w-full truncate rounded-sm text-left align-baseline blur-[3px] transition hover:cursor-pointer focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                };
+                let aria_label = if revealed {
+                    "Hide credential"
+                } else {
+                    "Reveal hidden credential"
+                };
+                view! {
+                    <button
+                        class=class
+                        type="button"
+                        aria-label=aria_label
+                        on:click=move |event| {
+                            event.stop_propagation();
+                            on_reveal.with_value(|f| f(toggle_value.clone()));
+                        }
+                    >
+                        {text}
+                    </button>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <span class="inline-block max-w-full truncate align-baseline">{text}</span>
+                }
+                .into_any()
+            }
+        }}
     }
 }
 
@@ -1149,7 +1558,7 @@ impl CostUsageBreakdown {
 }
 
 #[component]
-fn AccountRow<T, M, S, C, X, U, E, L, R, D>(
+fn AccountRow<T, M, S, C, X, U, E, L, R, D, H, V>(
     label: T,
     is_managed: M,
     is_live_system: S,
@@ -1160,6 +1569,9 @@ fn AccountRow<T, M, S, C, X, U, E, L, R, D>(
     is_loading: L,
     reauth_required: R,
     disabled: D,
+    hide_credentials: H,
+    is_credential_revealed: V,
+    on_reveal_credential: Box<dyn Fn(String) + Send + Sync>,
     on_set_system: Box<dyn Fn() + Send + Sync>,
     on_remove: Box<dyn Fn() + Send + Sync>,
     on_reauth: Box<dyn Fn() + Send + Sync>,
@@ -1175,6 +1587,8 @@ where
     L: Fn() -> bool + Send + Sync + 'static,
     R: Fn() -> bool + Send + Sync + 'static,
     D: Fn() -> bool + Send + Sync + 'static,
+    H: Fn() -> bool + Send + Sync + 'static,
+    V: Fn(&str) -> bool + Send + Sync + 'static,
 {
     let label = StoredValue::new(label);
     let is_managed = StoredValue::new(is_managed);
@@ -1186,6 +1600,9 @@ where
     let is_loading = StoredValue::new(is_loading);
     let reauth_required = StoredValue::new(reauth_required);
     let disabled = StoredValue::new(disabled);
+    let hide_credentials = StoredValue::new(hide_credentials);
+    let is_credential_revealed = StoredValue::new(is_credential_revealed);
+    let on_reveal_credential = StoredValue::new(on_reveal_credential);
     let on_set_system = StoredValue::new(on_set_system);
     let on_remove = StoredValue::new(on_remove);
     let on_reauth = StoredValue::new(on_reauth);
@@ -1212,7 +1629,14 @@ where
         <Card size=CardSize::Sm class="border-0 shadow-none">
             <div class="flex items-start justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                 <div class="flex min-w-0 items-baseline gap-2">
-                    <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">{label_call}</h2>
+                    <h2 class="truncate font-mono text-sm font-medium leading-5 tracking-normal">
+                        <CredentialText
+                            value=label_call
+                            hide_credentials=move || hide_credentials.with_value(|f| f())
+                            is_revealed=move |value| is_credential_revealed.with_value(|f| f(value))
+                            on_reveal=Box::new(move |value| on_reveal_credential.with_value(|f| f(value)))
+                        />
+                    </h2>
                     {move || is_live_system_call().then(|| view! {
                         <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="shrink-0 uppercase tracking-wide">
                             "System"
@@ -1448,14 +1872,28 @@ fn quota_event_class(severity: &QuotaEventSeverity) -> &'static str {
     }
 }
 
-fn quota_event_meta(event: &QuotaEvent) -> String {
+fn quota_event_body_suffix(event: &QuotaEvent) -> String {
+    match event.kind {
+        QuotaEventKind::Warning => format!(
+            ": {} is {:.0}% used.",
+            event.window_label,
+            event.used_percent.clamp(0.0, 100.0)
+        ),
+        QuotaEventKind::Reset => format!(
+            ": {} dropped to {:.0}% used.",
+            event.window_label,
+            event.used_percent.clamp(0.0, 100.0)
+        ),
+    }
+}
+
+fn quota_event_meta_suffix(event: &QuotaEvent) -> String {
     let threshold = event
         .threshold_percent
         .map(|percent| format!(" - threshold {:.0}%", percent))
         .unwrap_or_default();
     format!(
-        "{} - {} - {:.0}% used{} - {}",
-        event.account_label,
+        " - {} - {:.0}% used{} - {}",
         event.window_label,
         event.used_percent.clamp(0.0, 100.0),
         threshold,
