@@ -46,6 +46,38 @@ struct UsageSnapshot {
     updated_at: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum QuotaEventKind {
+    Warning,
+    Reset,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum QuotaEventSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct QuotaEvent {
+    id: String,
+    kind: QuotaEventKind,
+    severity: QuotaEventSeverity,
+    account_id: String,
+    account_label: String,
+    window_key: String,
+    window_label: String,
+    used_percent: f64,
+    threshold_percent: Option<f64>,
+    title: String,
+    body: String,
+    generated_at: i64,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum CodexUsageSourceMode {
@@ -112,6 +144,8 @@ struct CodexOverviewSnapshot {
     accounts: Vec<AccountSummary>,
     usage_by_account_id: HashMap<String, UsageSnapshot>,
     errors_by_account_id: HashMap<String, String>,
+    #[serde(default)]
+    quota_events: Vec<QuotaEvent>,
     cost_usage: Option<CostUsageSnapshot>,
     cost_error: Option<String>,
     generated_at: i64,
@@ -157,6 +191,9 @@ pub fn App() -> impl IntoView {
     let (accounts, set_accounts) = signal::<Vec<AccountSummary>>(Vec::new());
     let (usage_by_id, set_usage_by_id) = signal::<HashMap<String, UsageSnapshot>>(HashMap::new());
     let (errors_by_id, set_errors_by_id) = signal::<HashMap<String, String>>(HashMap::new());
+    let (quota_events, set_quota_events) = signal::<Vec<QuotaEvent>>(Vec::new());
+    let (dismissed_quota_event_ids, set_dismissed_quota_event_ids) =
+        signal::<HashSet<String>>(HashSet::new());
     let (loading_ids, set_loading_ids) = signal::<HashSet<String>>(HashSet::new());
     let (reauth_ids, set_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
     let (usage_source_mode, set_usage_source_mode) = signal(CodexUsageSourceMode::Auto);
@@ -176,6 +213,11 @@ pub fn App() -> impl IntoView {
             .iter()
             .map(|account| account.id.clone())
             .collect();
+        let quota_event_ids: HashSet<String> = snapshot
+            .quota_events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect();
         let reauth_ids: HashSet<String> = snapshot
             .errors_by_account_id
             .iter()
@@ -186,6 +228,10 @@ pub fn App() -> impl IntoView {
         set_accounts.set(snapshot.accounts);
         set_usage_by_id.set(snapshot.usage_by_account_id);
         set_errors_by_id.set(snapshot.errors_by_account_id);
+        set_quota_events.set(snapshot.quota_events);
+        set_dismissed_quota_event_ids.update(|set| {
+            set.retain(|id| quota_event_ids.contains(id));
+        });
         set_loading_ids.update(|set| set.retain(|id| next_ids.contains(id)));
         set_reauth_ids.set(reauth_ids);
         set_cost_usage.set(snapshot.cost_usage);
@@ -415,6 +461,14 @@ pub fn App() -> impl IntoView {
                     set_reauth_ids.update(|set| {
                         set.remove(&account_id);
                     });
+                    set_quota_events.update(|events| {
+                        events.retain(|event| event.account_id != account_id);
+                    });
+                    let remaining_quota_event_ids: HashSet<String> = quota_events
+                        .with(|events| events.iter().map(|event| event.id.clone()).collect());
+                    set_dismissed_quota_event_ids.update(|set| {
+                        set.retain(|id| remaining_quota_event_ids.contains(id));
+                    });
                     refresh_overview_snapshot(true);
                 }
                 Err(error) => set_global_error.set(Some(error.message)),
@@ -451,6 +505,14 @@ pub fn App() -> impl IntoView {
         .into_iter()
         .flatten()
         .max()
+    });
+    let visible_quota_events = Memo::new(move |_| {
+        let dismissed = dismissed_quota_event_ids.get();
+        quota_events
+            .get()
+            .into_iter()
+            .filter(|event| !dismissed.contains(&event.id))
+            .collect::<Vec<_>>()
     });
 
     view! {
@@ -586,6 +648,32 @@ pub fn App() -> impl IntoView {
             }}
 
             {move || {
+                if visible_quota_events.get().is_empty() {
+                    view! { <span></span> }.into_any()
+                } else {
+                    view! {
+                        <div class="mb-4 grid gap-2">
+                            <For
+                                each=move || visible_quota_events.get()
+                                key=|event| event.id.clone()
+                                children=move |event| {
+                                    let dismiss = Box::new(move |event_id: String| {
+                                        set_dismissed_quota_event_ids.update(|set| {
+                                            set.insert(event_id);
+                                        });
+                                    });
+                                    view! {
+                                        <QuotaEventCard event=event on_dismiss=dismiss/>
+                                    }
+                                }
+                            />
+                        </div>
+                    }
+                    .into_any()
+                }
+            }}
+
+            {move || {
                 let current = accounts.get();
                 if current.is_empty() {
                     if is_listing.get() {
@@ -712,6 +800,44 @@ pub fn App() -> impl IntoView {
                 }}
             </p>
         </main>
+    }
+}
+
+#[component]
+fn QuotaEventCard(
+    event: QuotaEvent,
+    on_dismiss: Box<dyn Fn(String) + Send + Sync>,
+) -> impl IntoView {
+    let event_id = event.id.clone();
+    let event_kind = quota_event_kind_label(&event.kind);
+    let event_class = quota_event_class(&event.severity);
+    let meta = quota_event_meta(&event);
+    let detail_title = format!(
+        "{} - {} - {}",
+        event.account_id, event.window_key, event.window_label
+    );
+
+    view! {
+        <div class=event_class title=detail_title>
+            <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="rounded-full border border-current/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                        {event_kind}
+                    </span>
+                    <strong class="text-sm font-semibold leading-5">{event.title}</strong>
+                </div>
+                <p class="mt-1 text-xs leading-5">{event.body}</p>
+                <p class="mt-1 text-[11px] opacity-75">{meta}</p>
+            </div>
+            <button
+                class="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-sm leading-none opacity-70 hover:cursor-pointer hover:border-current/20 hover:opacity-100"
+                type="button"
+                aria-label="Dismiss quota notification"
+                on:click=move |_| on_dismiss(event_id.clone())
+            >
+                "x"
+            </button>
+        </div>
     }
 }
 
@@ -967,6 +1093,7 @@ where
 fn UsageMeter(window: UsageWindow) -> impl IntoView {
     let used = window.used_percent.clamp(0.0, 100.0);
     let width = format!("width: {:.1}%;", used);
+    let fill_class = usage_meter_fill_class(used);
     let label = window.label.clone();
     let reset = window
         .reset_at
@@ -987,10 +1114,10 @@ fn UsageMeter(window: UsageWindow) -> impl IntoView {
                 aria-valuemax="100"
                 aria-valuenow={format!("{:.0}", used)}
             >
-                <div class="h-full min-w-0.5 rounded-full bg-[var(--success)] transition-all duration-300 ease-in-out" style=width></div>
+                <div class=fill_class style=width></div>
             </div>
             <div class="flex justify-between gap-3 text-[11px] text-[var(--muted-foreground)] max-sm:flex-col">
-                <span>{format!("{:.0}% remaining", window.remaining_percent)}</span>
+                <span>{format!("{:.0}% remaining", window.remaining_percent.clamp(0.0, 100.0))}</span>
                 <span>{reset}</span>
             </div>
         </div>
@@ -1063,6 +1190,52 @@ fn is_auth_failure_message(message: &str) -> bool {
         || message.contains("invalid_grant")
         || message.contains("auth.json was not found")
         || message.contains("does not contain oauth tokens")
+}
+
+fn quota_event_kind_label(kind: &QuotaEventKind) -> &'static str {
+    match kind {
+        QuotaEventKind::Warning => "Warning",
+        QuotaEventKind::Reset => "Reset",
+    }
+}
+
+fn quota_event_class(severity: &QuotaEventSeverity) -> &'static str {
+    match severity {
+        QuotaEventSeverity::Info => {
+            "flex items-start gap-3 rounded-md border border-[var(--success)] bg-[var(--success-muted)] p-3 text-[var(--foreground)] shadow-xs"
+        }
+        QuotaEventSeverity::Warning => {
+            "flex items-start gap-3 rounded-md border border-[var(--warning)] bg-[var(--warning-muted)] p-3 text-[var(--warning-foreground)] shadow-xs"
+        }
+        QuotaEventSeverity::Critical => {
+            "flex items-start gap-3 rounded-md border border-[var(--critical)] bg-[var(--critical-muted)] p-3 text-[var(--critical-foreground)] shadow-xs"
+        }
+    }
+}
+
+fn quota_event_meta(event: &QuotaEvent) -> String {
+    let threshold = event
+        .threshold_percent
+        .map(|percent| format!(" - threshold {:.0}%", percent))
+        .unwrap_or_default();
+    format!(
+        "{} - {} - {:.0}% used{} - {}",
+        event.account_label,
+        event.window_label,
+        event.used_percent.clamp(0.0, 100.0),
+        threshold,
+        format_time_ago(event.generated_at)
+    )
+}
+
+fn usage_meter_fill_class(used_percent: f64) -> &'static str {
+    if used_percent >= 100.0 {
+        "h-full min-w-0.5 rounded-full bg-[var(--critical)] transition-all duration-300 ease-in-out"
+    } else if used_percent >= 80.0 {
+        "h-full min-w-0.5 rounded-full bg-[var(--warning)] transition-all duration-300 ease-in-out"
+    } else {
+        "h-full min-w-0.5 rounded-full bg-[var(--success)] transition-all duration-300 ease-in-out"
+    }
 }
 
 fn format_cost(value: Option<f64>) -> String {

@@ -16,7 +16,7 @@ use codex::token_refresh;
 use codex::usage_fetcher;
 use codex::workspace_resolver::{self, WorkspaceResolution};
 use domain::account::AccountSummary;
-use domain::usage::{CodexOverviewSnapshot, CostUsageSnapshot, UsageSnapshot};
+use domain::usage::{CodexOverviewSnapshot, CostUsageSnapshot, QuotaEvent, UsageSnapshot};
 use error::AppError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -163,17 +163,21 @@ impl CodexSnapshotCoordinator {
             .await;
 
         let generated_at = OffsetDateTime::now_utc().unix_timestamp();
-        let snapshot = CodexOverviewSnapshot {
+        let mut snapshot = CodexOverviewSnapshot {
             accounts,
             usage_by_account_id,
             errors_by_account_id,
+            quota_events: Vec::new(),
             cost_usage,
             cost_error,
             generated_at,
             stale: false,
         };
+        snapshot.quota_events =
+            codex::quota_events::detect_quota_events(previous.as_ref(), &snapshot);
 
         self.store_and_emit(app, snapshot.clone()).await;
+        send_quota_notifications(app, &snapshot.quota_events);
         let _ = snapshot_cache::save_snapshot(&snapshot);
         Ok(snapshot)
     }
@@ -420,6 +424,38 @@ fn oauth_error_allows_cli_fallback(error: &AppError) -> bool {
             message.contains("status 401") || message.contains("status 403")
         }
         _ => false,
+    }
+}
+
+fn send_quota_notifications(app: &AppHandle, events: &[QuotaEvent]) {
+    if events.is_empty() {
+        return;
+    }
+
+    use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+    let notification = app.notification();
+    let permission_granted = match notification.permission_state() {
+        Ok(PermissionState::Granted) => true,
+        Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
+            matches!(
+                notification.request_permission(),
+                Ok(PermissionState::Granted)
+            )
+        }
+        Ok(PermissionState::Denied) | Err(_) => false,
+    };
+
+    if !permission_granted {
+        return;
+    }
+
+    for event in events {
+        let _ = notification
+            .builder()
+            .title(event.title.clone())
+            .body(event.body.clone())
+            .show();
     }
 }
 
@@ -1070,6 +1106,7 @@ fn emails_match(left: Option<&str>, right: Option<&str>) -> bool {
 pub fn run() {
     let snapshot_coordinator = Arc::new(CodexSnapshotCoordinator::default());
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(LoginRunnerState::default())
         .manage(snapshot_coordinator.clone())
         .setup(move |app| {

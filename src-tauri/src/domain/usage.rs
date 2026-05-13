@@ -33,6 +33,38 @@ pub struct UsageSnapshot {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaEventKind {
+    Warning,
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaEventSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaEvent {
+    pub id: String,
+    pub kind: QuotaEventKind,
+    pub severity: QuotaEventSeverity,
+    pub account_id: String,
+    pub account_label: String,
+    pub window_key: String,
+    pub window_label: String,
+    pub used_percent: f64,
+    pub threshold_percent: Option<f64>,
+    pub title: String,
+    pub body: String,
+    pub generated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CostUsageDailyPoint {
@@ -62,6 +94,8 @@ pub struct CodexOverviewSnapshot {
     pub accounts: Vec<AccountSummary>,
     pub usage_by_account_id: HashMap<String, UsageSnapshot>,
     pub errors_by_account_id: HashMap<String, String>,
+    #[serde(default)]
+    pub quota_events: Vec<QuotaEvent>,
     pub cost_usage: Option<CostUsageSnapshot>,
     pub cost_error: Option<String>,
     pub generated_at: i64,

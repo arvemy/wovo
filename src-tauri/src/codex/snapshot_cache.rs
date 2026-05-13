@@ -36,6 +36,7 @@ fn load_snapshot_from_path(path: &Path) -> Option<CodexOverviewSnapshot> {
     }
     let mut snapshot = stored.snapshot;
     snapshot.errors_by_account_id.clear();
+    snapshot.quota_events.clear();
     snapshot.cost_error = None;
     snapshot.stale = true;
     Some(snapshot)
@@ -44,6 +45,7 @@ fn load_snapshot_from_path(path: &Path) -> Option<CodexOverviewSnapshot> {
 fn save_snapshot_to_path(path: &Path, snapshot: &CodexOverviewSnapshot) -> Result<(), AppError> {
     let mut snapshot = snapshot.clone();
     snapshot.errors_by_account_id.clear();
+    snapshot.quota_events.clear();
     snapshot.cost_error = None;
     snapshot.stale = false;
 
@@ -115,7 +117,7 @@ fn unique_nonce() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::usage::CostUsageSnapshot;
+    use crate::domain::usage::{CostUsageSnapshot, QuotaEvent, QuotaEventKind, QuotaEventSeverity};
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -132,6 +134,20 @@ mod tests {
             accounts: Vec::new(),
             usage_by_account_id: HashMap::new(),
             errors_by_account_id: errors,
+            quota_events: vec![QuotaEvent {
+                id: "event-1".to_string(),
+                kind: QuotaEventKind::Warning,
+                severity: QuotaEventSeverity::Warning,
+                account_id: "account-1".to_string(),
+                account_label: "user@example.com".to_string(),
+                window_key: "primary".to_string(),
+                window_label: "5h limit".to_string(),
+                used_percent: 90.0,
+                threshold_percent: Some(90.0),
+                title: "Codex quota at 90%".to_string(),
+                body: "user@example.com: 5h limit is 90% used.".to_string(),
+                generated_at: 2,
+            }],
             cost_usage: Some(CostUsageSnapshot {
                 today_tokens: 10,
                 today_cost_usd: Some(0.1),
@@ -166,9 +182,38 @@ mod tests {
         let loaded = load_snapshot_from_path(&path).unwrap();
 
         assert!(loaded.errors_by_account_id.is_empty());
+        assert!(loaded.quota_events.is_empty());
         assert!(loaded.cost_error.is_none());
         assert!(loaded.stale);
         assert_eq!(loaded.cost_usage.unwrap().today_tokens, 10);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn old_snapshot_json_without_quota_events_still_loads() {
+        let path = temp_path("old-without-quota-events");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "snapshot": {
+                    "accounts": [],
+                    "usageByAccountId": {},
+                    "errorsByAccountId": {},
+                    "costUsage": null,
+                    "costError": null,
+                    "generatedAt": 2,
+                    "stale": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_snapshot_from_path(&path).unwrap();
+
+        assert!(loaded.quota_events.is_empty());
+        assert!(loaded.stale);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }
