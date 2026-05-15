@@ -32,3 +32,4 @@ directories = "6"
 base64 = "0.22"
 tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+tauri-plugin-updater = "2"

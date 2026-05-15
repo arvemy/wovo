@@ -4,11 +4,12 @@ use std::rc::Rc;
 
 use crate::codex_api::{
     account_action, invoke_tauri, js_command_error, listen_tauri, refresh_snapshot,
-    AccountSourceKind, AccountSummary, CodexOverviewSnapshot, CodexSettings, CodexUsageSourceMode,
-    CommandError, CostUsageSnapshot, CreditsSnapshot, QuotaEvent,
-    SetAutoAccountSwitchingEnabledArgs, SetAutoSwitchThresholdArgs, SetCostUsageEnabledArgs,
-    SetHideAccountCredentialsArgs, SetLaunchOnLoginArgs, SetNotificationsEnabledArgs,
-    SetUsageSourceModeArgs, SetWeeklyPenaltyThresholdArgs, UsageSnapshot, UsageWindow,
+    AccountSourceKind, AccountSummary, AppUpdateInfo, AppUpdateProgress, CodexOverviewSnapshot,
+    CodexSettings, CodexUsageSourceMode, CommandError, CostUsageSnapshot, CreditsSnapshot,
+    QuotaEvent, SetAutoAccountSwitchingEnabledArgs, SetAutoSwitchThresholdArgs,
+    SetCostUsageEnabledArgs, SetHideAccountCredentialsArgs, SetLaunchOnLoginArgs,
+    SetNotificationsEnabledArgs, SetUsageSourceModeArgs, SetWeeklyPenaltyThresholdArgs,
+    UsageSnapshot, UsageWindow,
 };
 use crate::cost_usage_view::CostUsageBreakdown;
 use crate::formatting::{
@@ -97,6 +98,9 @@ pub fn App() -> impl IntoView {
     let (is_settings_loading, set_is_settings_loading) = signal(true);
     let (is_listing, set_is_listing) = signal(true);
     let (is_account_action_loading, set_is_account_action_loading) = signal(false);
+    let (app_update, set_app_update) = signal::<Option<AppUpdateInfo>>(None);
+    let (is_update_installing, set_is_update_installing) = signal(false);
+    let (update_progress, set_update_progress) = signal::<Option<AppUpdateProgress>>(None);
     let (global_error, set_global_error) = signal::<Option<String>>(None);
 
     let apply_settings = move |settings: CodexSettings| {
@@ -553,13 +557,62 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let listen_for_update_progress = move || {
+        let handler = Closure::<dyn FnMut(JsValue)>::new(move |event| {
+            let payload = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+                .unwrap_or(JsValue::UNDEFINED);
+            if let Ok(progress) = serde_wasm_bindgen::from_value::<AppUpdateProgress>(payload) {
+                let installed = progress.phase == "installed";
+                set_update_progress.set(Some(progress));
+                if installed {
+                    set_is_update_installing.set(false);
+                }
+            }
+        });
+        let function = handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        spawn_local(async move {
+            match listen_tauri("app:update-progress", &function).await {
+                Ok(_) => handler.forget(),
+                Err(error) => set_global_error.set(Some(js_command_error(&error).message)),
+            }
+        });
+    };
+
+    let check_for_app_update = move || {
+        spawn_local(async move {
+            if let Ok(update) =
+                invoke_tauri::<Option<AppUpdateInfo>>("check_app_update", JsValue::UNDEFINED).await
+            {
+                set_app_update.set(update);
+            }
+        });
+    };
+
     load_settings();
     load_cached_snapshot();
     listen_for_snapshots();
     listen_for_settings();
+    listen_for_update_progress();
     refresh_overview_snapshot(false);
+    check_for_app_update();
 
     let refresh_all = move |_| refresh_overview_snapshot(true);
+
+    let install_app_update = move || {
+        spawn_local(async move {
+            set_is_update_installing.set(true);
+            set_update_progress.set(None);
+            set_global_error.set(None);
+
+            match invoke_tauri::<()>("install_app_update", JsValue::UNDEFINED).await {
+                Ok(()) => {}
+                Err(error) => {
+                    set_is_update_installing.set(false);
+                    set_global_error.set(Some(error.message));
+                }
+            }
+        });
+    };
 
     let add_account = move || {
         spawn_local(async move {
@@ -694,7 +747,7 @@ pub fn App() -> impl IntoView {
                 }
             }
         >
-            <div class="app-shell mx-auto flex h-screen w-[min(960px,calc(100vw-1rem))] min-w-0 flex-col gap-3 px-3 py-3">
+            <div class="app-shell mx-auto flex h-screen w-full max-w-[960px] min-w-0 flex-col gap-3 px-3 py-3">
                 <nav class="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border">
                     <ProviderNav
                         active=move || active_provider.get()
@@ -982,6 +1035,83 @@ pub fn App() -> impl IntoView {
             }}
 
             {move || {
+                app_update.get().map(|update| {
+                    let version = update.version;
+                    let current_version = update.current_version;
+                    let body = update.body.filter(|body| !body.trim().is_empty());
+                    let date = update.date;
+                    let can_install = update.can_install;
+
+                    view! {
+                        <Alert class="mb-4 border-primary bg-secondary text-foreground">
+                            <AlertDescription class="flex flex-wrap items-center justify-between gap-3">
+                                <div class="min-w-0">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <Badge variant=BadgeVariant::Default size=BadgeSize::Sm class="rounded-full uppercase tracking-wide">
+                                            "Update"
+                                        </Badge>
+                                        <strong class="text-sm font-semibold leading-5">
+                                            {format!("WoVo {version} is available")}
+                                        </strong>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground">
+                                        {move || update_progress.get().map(update_install_label).unwrap_or_else(|| {
+                                            if can_install {
+                                                format!("Installed version: {current_version}")
+                                            } else {
+                                                format!("Installed version: {current_version}. Update with your package manager.")
+                                            }
+                                        })}
+                                    </p>
+                                    {body.map(|body| view! {
+                                        <p class="mt-1 max-w-full truncate text-xs text-muted-foreground">{body}</p>
+                                    })}
+                                    {date.map(|date| view! {
+                                        <p class="mt-1 text-[11px] text-muted-foreground">{format!("Published {date}")}</p>
+                                    })}
+                                </div>
+                                <div class="flex shrink-0 items-center gap-2">
+                                    {if can_install {
+                                        view! {
+                                            <button
+                                                class=ButtonClass { variant: ButtonVariant::Default, size: ButtonSize::Sm }.with_class("")
+                                                type="button"
+                                                disabled=move || is_update_installing.get()
+                                                on:click=move |_| install_app_update()
+                                            >
+                                                {move || if is_update_installing.get() {
+                                                    view! { <LoaderCircle class="size-3.5 animate-spin"/> }.into_any()
+                                                } else {
+                                                    view! { <RefreshCw class="size-3.5"/> }.into_any()
+                                                }}
+                                                <span>{move || if is_update_installing.get() { "Installing" } else { "Install" }}</span>
+                                            </button>
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <Badge variant=BadgeVariant::Muted size=BadgeSize::Default>
+                                                "Manual update"
+                                            </Badge>
+                                        }.into_any()
+                                    }}
+                                    <button
+                                        class=ButtonClass { variant: ButtonVariant::Ghost, size: ButtonSize::Icon }.with_class("size-8 text-muted-foreground")
+                                        type="button"
+                                        aria-label="Dismiss update"
+                                        title="Dismiss update"
+                                        disabled=move || is_update_installing.get()
+                                        on:click=move |_| set_app_update.set(None)
+                                    >
+                                        <X class="size-4"/>
+                                    </button>
+                                </div>
+                            </AlertDescription>
+                        </Alert>
+                    }
+                })
+            }}
+
+            {move || {
                 if visible_quota_events.get().is_empty() {
                     view! { <span></span> }.into_any()
                 } else {
@@ -1180,6 +1310,41 @@ pub fn App() -> impl IntoView {
                 }}
             </div>
         </div>
+    }
+}
+
+fn update_install_label(progress: AppUpdateProgress) -> String {
+    match progress.phase.as_str() {
+        "started" => "Starting update download...".to_string(),
+        "progress" => {
+            if let Some(content_length) = progress.content_length.filter(|value| *value > 0) {
+                let percent = ((progress.downloaded as f64 / content_length as f64) * 100.0)
+                    .clamp(0.0, 100.0);
+                format!("Downloading update {:.0}%", percent)
+            } else if progress.downloaded > 0 {
+                format!("Downloaded {}", format_bytes(progress.downloaded))
+            } else if let Some(chunk_length) = progress.chunk_length {
+                format!("Downloading update ({})", format_bytes(chunk_length as u64))
+            } else {
+                "Downloading update...".to_string()
+            }
+        }
+        "downloaded" => "Download complete. Installing...".to_string(),
+        "installed" => "Update installed. Restarting...".to_string(),
+        _ => "Preparing update...".to_string(),
+    }
+}
+
+fn format_bytes(value: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+
+    if value as f64 >= MB {
+        format!("{:.1} MB", value as f64 / MB)
+    } else if value as f64 >= KB {
+        format!("{:.1} KB", value as f64 / KB)
+    } else {
+        format!("{value} B")
     }
 }
 

@@ -108,7 +108,7 @@
 
 html,
 body {
-  min-width: 640px;
+  width: 100%;
   min-height: 100vh;
   margin: 0;
   overflow: hidden;

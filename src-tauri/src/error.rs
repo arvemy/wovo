@@ -41,6 +41,8 @@ pub enum AppError {
     InvalidUsageResponse,
     #[error("Launch-on-login registration failed: {0}")]
     LaunchOnLogin(String),
+    #[error("App update failed: {0}")]
+    AppUpdate(String),
 }
 
 impl AppError {
@@ -65,6 +67,7 @@ impl AppError {
             Self::UsageFetch(_) => "usage_fetch",
             Self::InvalidUsageResponse => "invalid_usage_response",
             Self::LaunchOnLogin(_) => "launch_on_login",
+            Self::AppUpdate(_) => "app_update",
         }
     }
 }

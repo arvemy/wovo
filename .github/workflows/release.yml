@@ -3,13 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag to publish (for example, v1.2.3)'
-        required: true
-        type: string
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   checks:
@@ -18,20 +16,9 @@ jobs:
       contents: read
 
     steps:
-      - name: Validate manual release tag
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[^[:space:]]+$ ]]; then
-            echo "Manual releases require a v-prefixed tag." >&2
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
+          fetch-depth: 0
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -63,11 +50,20 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate release version
+        run: node scripts/validate-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Build CSS
+        run: pnpm run build:css
+
+      - name: Check generated CSS
+        run: git diff --exit-code -- styles.css
+
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust tests
         run: cargo test --workspace
@@ -78,6 +74,7 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - platform: macos-latest
@@ -96,21 +93,9 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - name: Validate manual release tag
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[^[:space:]]+$ ]]; then
-            echo "Manual releases require a v-prefixed tag." >&2
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
-        if: env.ACT != 'true'
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
+          fetch-depth: 0
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -151,19 +136,19 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build bundles
-        if: env.ACT == 'true'
-        run: pnpm exec tauri build ${{ matrix.args }}
-
       - name: Build and release
-        if: env.ACT != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NO_STRIP: 'true'
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-          releaseName: wovo v__VERSION__
+          tagName: ${{ github.ref_name }}
+          releaseName: WoVo v__VERSION__
           releaseBody: See the assets to download and install this version.
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json

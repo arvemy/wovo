@@ -22,7 +22,9 @@ pub(crate) fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(LoginRunnerState::default())
+        .manage(crate::app_updates::PendingAppUpdate::default())
         .manage(snapshot_coordinator.clone())
         .setup(move |app| {
             configure_window_icon(app);
@@ -37,6 +39,8 @@ pub(crate) fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             crate::account_commands::add_codex_account,
+            crate::app_updates::check_app_update,
+            crate::app_updates::install_app_update,
             crate::account_commands::cancel_codex_account_login,
             crate::snapshot::get_cached_codex_snapshot,
             crate::settings_commands::get_codex_settings,

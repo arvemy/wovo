@@ -165,6 +165,25 @@ pub(crate) struct SetLaunchOnLoginArgs {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AppUpdateInfo {
+    pub(crate) version: String,
+    pub(crate) current_version: String,
+    pub(crate) date: Option<String>,
+    pub(crate) body: Option<String>,
+    pub(crate) can_install: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppUpdateProgress {
+    pub(crate) phase: String,
+    pub(crate) downloaded: u64,
+    pub(crate) chunk_length: Option<usize>,
+    pub(crate) content_length: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CostUsageDailyPoint {
     pub(crate) day_key: String,
     pub(crate) input_tokens: i64,
