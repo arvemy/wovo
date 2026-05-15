@@ -6502,6 +6502,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "directories",
+ "notify-rust",
  "reqwest",
  "serde",
  "serde_json",
@@ -6515,6 +6516,7 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ pub(crate) fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(LoginRunnerState::default())
         .manage(crate::app_updates::PendingAppUpdate::default())
+        .manage(crate::notifications::NotificationDiagnosticsState::default())
         .manage(snapshot_coordinator.clone())
         .setup(move |app| {
             configure_window_icon(app);
@@ -44,6 +45,7 @@ pub(crate) fn run() {
             crate::account_commands::cancel_codex_account_login,
             crate::snapshot::get_cached_codex_snapshot,
             crate::settings_commands::get_codex_settings,
+            crate::settings_commands::get_codex_notification_status,
             crate::account_commands::get_detected_codex_account,
             crate::account_commands::list_codex_accounts,
             crate::account_commands::reauthenticate_codex_account,
@@ -51,13 +53,12 @@ pub(crate) fn run() {
             crate::snapshot::refresh_codex_snapshot,
             crate::account_commands::set_system_codex_account,
             crate::settings_commands::set_codex_auto_account_switching_enabled,
-            crate::settings_commands::set_codex_auto_switch_threshold_percent,
             crate::settings_commands::set_codex_cost_usage_enabled,
             crate::settings_commands::set_codex_hide_account_credentials,
             crate::settings_commands::set_codex_notifications_enabled,
             crate::settings_commands::set_codex_usage_source_mode,
-            crate::settings_commands::set_codex_weekly_penalty_threshold,
             crate::settings_commands::set_codex_launch_on_login,
+            crate::settings_commands::send_codex_test_notification,
             crate::usage_commands::refresh_codex_usage,
             crate::usage_commands::refresh_all_usage
         ])

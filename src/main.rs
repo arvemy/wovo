@@ -1,9 +1,11 @@
 mod app;
 mod codex_api;
+mod components;
 mod cost_usage_view;
 mod formatting;
 mod theme;
 mod ui;
+mod views;
 
 use app::*;
 use leptos::prelude::*;

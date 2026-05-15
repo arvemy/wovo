@@ -1,3 +1,5 @@
+mod atomic_file;
+
 pub mod account_store;
 pub mod auth_store;
 pub mod cost_usage;

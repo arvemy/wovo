@@ -1,11 +1,200 @@
 use crate::auto_switch::AutoSwitchNotification;
 use crate::domain::usage::{QuotaEvent, QuotaEventKind};
-use tauri::AppHandle;
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexNotification {
     title: String,
     body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationMode {
+    Normal,
+    Test,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NotificationDiagnostics {
+    pub(crate) last_attempt_at: Option<i64>,
+    pub(crate) last_status: Option<String>,
+    pub(crate) last_error: Option<String>,
+    pub(crate) last_title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NotificationStatus {
+    pub(crate) diagnostics: NotificationDiagnostics,
+    pub(crate) test_available: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct NotificationDiagnosticsState {
+    latest: Mutex<NotificationDiagnostics>,
+}
+
+impl NotificationDiagnosticsState {
+    fn current(&self) -> NotificationDiagnostics {
+        match self.latest.lock() {
+            Ok(latest) => latest.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn record(&self, diagnostics: NotificationDiagnostics) {
+        match self.latest.lock() {
+            Ok(mut latest) => {
+                *latest = diagnostics;
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = diagnostics;
+            }
+        }
+    }
+}
+
+pub(crate) fn notification_status(app: &AppHandle) -> NotificationStatus {
+    NotificationStatus {
+        diagnostics: current_diagnostics(app),
+        test_available: tauri::is_dev(),
+    }
+}
+
+pub(crate) async fn send_test_notification(app: &AppHandle) -> NotificationStatus {
+    let surface = prepare_test_notification_surface(app).await;
+    let diagnostics = show_notification_with_mode(
+        app,
+        "WoVo notification test".to_string(),
+        "Native notifications are reachable from this Tauri dev session.".to_string(),
+        NotificationMode::Test,
+    );
+    restore_test_notification_surface(surface);
+    NotificationStatus {
+        diagnostics,
+        test_available: tauri::is_dev(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct TestNotificationSurface {
+    restore_windows: Vec<TestNotificationWindow>,
+}
+
+#[cfg(target_os = "linux")]
+struct TestNotificationWindow {
+    window: tauri::WebviewWindow,
+    was_focused: bool,
+}
+
+#[cfg(target_os = "linux")]
+async fn prepare_test_notification_surface(app: &AppHandle) -> TestNotificationSurface {
+    let mut restore_windows = Vec::new();
+    for window in app.webview_windows().into_values() {
+        let was_visible = window.is_visible().unwrap_or(true);
+        let was_minimized = window.is_minimized().unwrap_or(false);
+        let was_focused = window.is_focused().unwrap_or(false);
+
+        if was_visible && !was_minimized && window.minimize().is_ok() {
+            restore_windows.push(TestNotificationWindow {
+                window,
+                was_focused,
+            });
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    TestNotificationSurface { restore_windows }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_test_notification_surface(surface: TestNotificationSurface) {
+    let mut focused_window = None;
+
+    for entry in surface.restore_windows {
+        let _ = entry.window.show();
+        let _ = entry.window.unminimize();
+        if entry.was_focused {
+            focused_window = Some(entry.window);
+        }
+    }
+
+    if let Some(window) = focused_window {
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct TestNotificationSurface;
+
+#[cfg(not(target_os = "linux"))]
+async fn prepare_test_notification_surface(_app: &AppHandle) -> TestNotificationSurface {
+    TestNotificationSurface
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restore_test_notification_surface(_surface: TestNotificationSurface) {}
+
+#[cfg(target_os = "linux")]
+fn platform_show_notification(
+    _app: &AppHandle,
+    title: &str,
+    body: &str,
+    mode: NotificationMode,
+) -> Result<(), String> {
+    use notify_rust::{Hint, Notification, Timeout, Urgency};
+
+    let mut notification = Notification::new();
+    notification
+        .appname("wovo")
+        .summary(title)
+        .body(body)
+        .icon("wovo");
+
+    notification
+        .hint(Hint::DesktopEntry("wovo".to_string()))
+        .timeout(match mode {
+            NotificationMode::Normal => Timeout::Milliseconds(5_000),
+            NotificationMode::Test => Timeout::Never,
+        });
+
+    if mode == NotificationMode::Test {
+        notification.urgency(Urgency::Critical);
+    }
+
+    notification
+        .show()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_show_notification(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+    _mode: NotificationMode,
+) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    app.notification()
+        .builder()
+        .title(title.to_string())
+        .body(body.to_string())
+        .show()
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn notification_success_status() -> String {
+    "sent".to_string()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn notification_success_status() -> String {
+    "queued".to_string()
 }
 
 pub(crate) fn send_codex_notifications(
@@ -19,40 +208,103 @@ pub(crate) fn send_codex_notifications(
         return;
     }
 
-    use tauri_plugin_notification::{NotificationExt, PermissionState};
-
-    let notification = app.notification();
-    let permission_granted = match notification.permission_state() {
-        Ok(PermissionState::Granted) => true,
-        Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
-            matches!(
-                notification.request_permission(),
-                Ok(PermissionState::Granted)
-            )
-        }
-        Ok(PermissionState::Denied) | Err(_) => false,
-    };
-
-    if !permission_granted {
-        return;
-    }
-
     for event in events {
         let payload = quota_event_notification(event, hide_credentials);
-        let _ = notification
-            .builder()
-            .title(payload.title)
-            .body(payload.body)
-            .show();
+        let _ = show_notification(app, payload.title, payload.body);
     }
 
     if let Some(auto_switch) = auto_switch {
         let payload = auto_switch_notification(auto_switch, hide_credentials);
-        let _ = notification
-            .builder()
-            .title(payload.title)
-            .body(payload.body)
-            .show();
+        let _ = show_notification(app, payload.title, payload.body);
+    }
+}
+
+fn show_notification(app: &AppHandle, title: String, body: String) -> NotificationDiagnostics {
+    show_notification_with_mode(app, title, body, NotificationMode::Normal)
+}
+
+fn show_notification_with_mode(
+    app: &AppHandle,
+    title: String,
+    body: String,
+    mode: NotificationMode,
+) -> NotificationDiagnostics {
+    use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+    let attempted_at = time::OffsetDateTime::now_utc().unix_timestamp();
+    if requires_tauri_permission_check(mode) {
+        let notification = app.notification();
+        let permission_granted = match notification.permission_state() {
+            Ok(PermissionState::Granted) => true,
+            Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
+                matches!(
+                    notification.request_permission(),
+                    Ok(PermissionState::Granted)
+                )
+            }
+            Ok(PermissionState::Denied) => false,
+            Err(error) => {
+                let diagnostics = NotificationDiagnostics {
+                    last_attempt_at: Some(attempted_at),
+                    last_status: Some("failed".to_string()),
+                    last_error: Some(format!("permission check failed: {error}")),
+                    last_title: Some(title),
+                };
+                record_diagnostics(app, diagnostics.clone());
+                return diagnostics;
+            }
+        };
+
+        if !permission_granted {
+            let diagnostics = NotificationDiagnostics {
+                last_attempt_at: Some(attempted_at),
+                last_status: Some("permissionDenied".to_string()),
+                last_error: Some("notification permission was denied".to_string()),
+                last_title: Some(title),
+            };
+            record_diagnostics(app, diagnostics.clone());
+            return diagnostics;
+        }
+    }
+
+    let result = platform_show_notification(app, &title, &body, mode);
+    let diagnostics = match result {
+        Ok(()) => NotificationDiagnostics {
+            last_attempt_at: Some(attempted_at),
+            last_status: Some(notification_success_status()),
+            last_error: None,
+            last_title: Some(title),
+        },
+        Err(error) => NotificationDiagnostics {
+            last_attempt_at: Some(attempted_at),
+            last_status: Some("failed".to_string()),
+            last_error: Some(error.to_string()),
+            last_title: Some(title),
+        },
+    };
+    record_diagnostics(app, diagnostics.clone());
+    diagnostics
+}
+
+#[cfg(target_os = "linux")]
+fn requires_tauri_permission_check(mode: NotificationMode) -> bool {
+    mode != NotificationMode::Test
+}
+
+#[cfg(not(target_os = "linux"))]
+fn requires_tauri_permission_check(_mode: NotificationMode) -> bool {
+    true
+}
+
+fn current_diagnostics(app: &AppHandle) -> NotificationDiagnostics {
+    app.try_state::<NotificationDiagnosticsState>()
+        .map(|state| state.current())
+        .unwrap_or_default()
+}
+
+fn record_diagnostics(app: &AppHandle, diagnostics: NotificationDiagnostics) {
+    if let Some(state) = app.try_state::<NotificationDiagnosticsState>() {
+        state.record(diagnostics);
     }
 }
 

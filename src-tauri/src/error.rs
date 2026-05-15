@@ -7,6 +7,8 @@ pub enum AppError {
     AuthNotFound,
     #[error("Codex auth.json could not be read: {0}")]
     AuthRead(String),
+    #[error("Codex auth.json could not be written: {0}")]
+    AuthWrite(String),
     #[error("Codex auth.json could not be decoded: {0}")]
     AuthDecode(String),
     #[error("Codex auth.json does not contain OAuth tokens.")]
@@ -41,6 +43,8 @@ pub enum AppError {
     InvalidUsageResponse,
     #[error("Launch-on-login registration failed: {0}")]
     LaunchOnLogin(String),
+    #[error("Notification failed: {0}")]
+    Notification(String),
     #[error("App update failed: {0}")]
     AppUpdate(String),
 }
@@ -50,6 +54,7 @@ impl AppError {
         match self {
             Self::AuthNotFound => "auth_not_found",
             Self::AuthRead(_) => "auth_read",
+            Self::AuthWrite(_) => "auth_write",
             Self::AuthDecode(_) => "auth_decode",
             Self::MissingTokens => "missing_tokens",
             Self::UnknownAccount(_) => "unknown_account",
@@ -67,6 +72,7 @@ impl AppError {
             Self::UsageFetch(_) => "usage_fetch",
             Self::InvalidUsageResponse => "invalid_usage_response",
             Self::LaunchOnLogin(_) => "launch_on_login",
+            Self::Notification(_) => "notification",
             Self::AppUpdate(_) => "app_update",
         }
     }

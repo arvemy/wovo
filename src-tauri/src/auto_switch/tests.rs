@@ -1,11 +1,7 @@
 use super::*;
 
 fn default_switch_settings() -> CodexSettings {
-    CodexSettings {
-        auto_switch_threshold_percent: 100.0,
-        weekly_penalty_threshold: 20.0,
-        ..CodexSettings::default()
-    }
+    CodexSettings::default()
 }
 fn switch_account(
     id: &str,
@@ -86,7 +82,7 @@ fn auto_switch_candidate_requires_exhausted_live_managed_account() {
         ),
     ];
     let usage = usage_map(vec![
-        usage_for_account("current", 99.0, 1.0, 0.0, 100.0),
+        usage_for_account("current", 89.0, 11.0, 0.0, 100.0),
         usage_for_account("target", 10.0, 90.0, 0.0, 100.0),
     ]);
 

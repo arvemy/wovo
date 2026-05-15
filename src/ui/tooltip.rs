@@ -69,7 +69,7 @@ pub fn Tooltip(#[prop(into, optional)] class: String, children: Children) -> imp
 }
 
 #[derive(Clone, Copy, Default, strum::Display, strum::AsRefStr)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "component API supports all tooltip placements")]
 pub enum TooltipPosition {
     #[default]
     Top,
@@ -79,7 +79,7 @@ pub enum TooltipPosition {
 }
 
 #[derive(Clone, Copy, Default, strum::Display, strum::AsRefStr)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "component API supports all tooltip alignments")]
 pub enum TooltipAlign {
     Start,
     #[default]

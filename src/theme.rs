@@ -54,11 +54,3 @@ pub(crate) fn current_theme_preference() -> ThemeMode {
 pub(crate) fn set_theme_preference(mode: &str) -> Result<JsValue, JsValue> {
     set_theme_preference_raw(mode)
 }
-
-pub(crate) fn theme_menu_item_class(selected: bool) -> &'static str {
-    if selected {
-        "flex h-8 w-full items-center justify-between rounded-sm bg-accent px-2 text-sm font-medium text-accent-foreground transition-colors"
-    } else {
-        "flex h-8 w-full items-center justify-between rounded-sm px-2 text-sm font-medium text-muted-foreground transition-colors hover:cursor-pointer hover:bg-accent hover:text-accent-foreground"
-    }
-}

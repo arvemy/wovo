@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use tw_merge::tw_merge;
 
 #[derive(Clone, Copy, Default, PartialEq)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "component API supports vertical separators")]
 pub enum SeparatorOrientation {
     #[default]
     Horizontal,

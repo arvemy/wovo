@@ -99,20 +99,24 @@ pub(crate) struct CodexSettings {
     pub(crate) notifications_enabled: bool,
     pub(crate) auto_account_switching_enabled: bool,
     pub(crate) hide_account_credentials: bool,
-    #[serde(default = "default_auto_switch_threshold")]
-    pub(crate) auto_switch_threshold_percent: f64,
-    #[serde(default = "default_weekly_penalty_threshold")]
-    pub(crate) weekly_penalty_threshold: f64,
     #[serde(default)]
     pub(crate) launch_on_login: bool,
 }
 
-fn default_auto_switch_threshold() -> f64 {
-    90.0
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NotificationDiagnostics {
+    pub(crate) last_attempt_at: Option<i64>,
+    pub(crate) last_status: Option<String>,
+    pub(crate) last_error: Option<String>,
+    pub(crate) last_title: Option<String>,
 }
 
-fn default_weekly_penalty_threshold() -> f64 {
-    20.0
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NotificationStatus {
+    pub(crate) diagnostics: NotificationDiagnostics,
+    pub(crate) test_available: bool,
 }
 
 #[derive(Serialize)]
@@ -143,18 +147,6 @@ pub(crate) struct SetAutoAccountSwitchingEnabledArgs {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetHideAccountCredentialsArgs {
     pub(crate) enabled: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SetAutoSwitchThresholdArgs {
-    pub(crate) value: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SetWeeklyPenaltyThresholdArgs {
-    pub(crate) value: f64,
 }
 
 #[derive(Serialize)]

@@ -11,18 +11,13 @@ pub fn detect_quota_events(
     previous: Option<&CodexOverviewSnapshot>,
     current: &CodexOverviewSnapshot,
 ) -> Vec<QuotaEvent> {
-    let Some(previous) = previous else {
-        return Vec::new();
-    };
-
     let mut events = Vec::new();
     for account in &current.accounts {
         let Some(current_usage) = current.usage_by_account_id.get(&account.id) else {
             continue;
         };
-        let Some(previous_usage) = previous.usage_by_account_id.get(&account.id) else {
-            continue;
-        };
+        let previous_usage =
+            previous.and_then(|snapshot| snapshot.usage_by_account_id.get(&account.id));
 
         collect_window_events(
             &mut events,
@@ -49,31 +44,46 @@ fn collect_window_events(
     events: &mut Vec<QuotaEvent>,
     account: &AccountSummary,
     current_usage: &UsageSnapshot,
-    previous_usage: &UsageSnapshot,
+    previous_usage: Option<&UsageSnapshot>,
     window_key: &str,
     generated_at: i64,
 ) {
-    let current_window = window_by_key(current_usage, window_key);
-    let previous_window = window_by_key(previous_usage, window_key);
-    let (Some(current_window), Some(previous_window)) = (current_window, previous_window) else {
+    let Some(current_window) = window_by_key(current_usage, window_key) else {
         return;
     };
 
     let current_used = normalized_percent(current_window.used_percent);
-    let previous_used = normalized_percent(previous_window.used_percent);
 
-    if previous_used > RESET_USED_PERCENT && current_used <= RESET_USED_PERCENT {
-        events.push(reset_event(
-            account,
-            window_key,
-            current_window,
-            current_used,
-            generated_at,
-        ));
+    if let Some(previous_window) = previous_usage.and_then(|usage| window_by_key(usage, window_key))
+    {
+        let previous_used = normalized_percent(previous_window.used_percent);
+
+        if previous_used > RESET_USED_PERCENT && current_used <= RESET_USED_PERCENT {
+            events.push(reset_event(
+                account,
+                window_key,
+                current_window,
+                current_used,
+                generated_at,
+            ));
+            return;
+        }
+
+        if let Some(threshold) = crossed_warning_threshold(previous_used, current_used) {
+            events.push(warning_event(
+                account,
+                window_key,
+                current_window,
+                current_used,
+                threshold,
+                generated_at,
+            ));
+        }
+
         return;
     }
 
-    if let Some(threshold) = crossed_warning_threshold(previous_used, current_used) {
+    if let Some(threshold) = current_warning_threshold(current_used) {
         events.push(warning_event(
             account,
             window_key,
@@ -83,6 +93,14 @@ fn collect_window_events(
             generated_at,
         ));
     }
+}
+
+fn current_warning_threshold(current_used: f64) -> Option<f64> {
+    WARNING_THRESHOLDS
+        .iter()
+        .rev()
+        .copied()
+        .find(|threshold| current_used >= *threshold)
 }
 
 fn window_by_key<'a>(usage: &'a UsageSnapshot, window_key: &str) -> Option<&'a UsageWindow> {
@@ -346,10 +364,22 @@ mod tests {
     }
 
     #[test]
-    fn missing_previous_snapshot_does_not_emit_events() {
+    fn missing_previous_snapshot_emits_current_warning_once() {
         let current = snapshot(100.0, 0.0, 2);
 
         let events = detect_quota_events(None, &current);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, QuotaEventKind::Warning);
+        assert_eq!(events[0].threshold_percent, Some(100.0));
+    }
+
+    #[test]
+    fn already_warned_state_does_not_emit_again() {
+        let previous = snapshot(82.0, 0.0, 1);
+        let current = snapshot(83.0, 0.0, 2);
+
+        let events = detect_quota_events(Some(&previous), &current);
 
         assert!(events.is_empty());
     }

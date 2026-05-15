@@ -5,4 +5,5 @@ pub mod card;
 pub mod checkbox;
 pub mod progress;
 pub mod separator;
+pub mod switch;
 pub mod tooltip;

@@ -1,5 +1,6 @@
 use crate::codex::settings::{self, CodexSettings, CodexUsageSourceMode};
 use crate::error::AppError;
+use crate::notifications::NotificationStatus;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
@@ -39,6 +40,24 @@ pub(crate) fn set_codex_notifications_enabled(
 }
 
 #[tauri::command]
+pub(crate) fn get_codex_notification_status(app: AppHandle) -> NotificationStatus {
+    crate::notifications::notification_status(&app)
+}
+
+#[tauri::command]
+pub(crate) async fn send_codex_test_notification(
+    app: AppHandle,
+) -> Result<NotificationStatus, AppError> {
+    if !tauri::is_dev() {
+        return Err(AppError::Notification(
+            "notification tests are only available in Tauri dev mode".to_string(),
+        ));
+    }
+
+    Ok(crate::notifications::send_test_notification(&app).await)
+}
+
+#[tauri::command]
 pub(crate) fn set_codex_auto_account_switching_enabled(
     app: AppHandle,
     enabled: bool,
@@ -54,26 +73,6 @@ pub(crate) fn set_codex_hide_account_credentials(
     enabled: bool,
 ) -> Result<CodexSettings, AppError> {
     let settings = settings::save_hide_account_credentials(enabled)?;
-    crate::tray::publish_settings_update(&app, &settings);
-    Ok(settings)
-}
-
-#[tauri::command]
-pub(crate) fn set_codex_auto_switch_threshold_percent(
-    app: AppHandle,
-    value: f64,
-) -> Result<CodexSettings, AppError> {
-    let settings = settings::save_auto_switch_threshold_percent(value)?;
-    crate::tray::publish_settings_update(&app, &settings);
-    Ok(settings)
-}
-
-#[tauri::command]
-pub(crate) fn set_codex_weekly_penalty_threshold(
-    app: AppHandle,
-    value: f64,
-) -> Result<CodexSettings, AppError> {
-    let settings = settings::save_weekly_penalty_threshold(value)?;
     crate::tray::publish_settings_update(&app, &settings);
     Ok(settings)
 }

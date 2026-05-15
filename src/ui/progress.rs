@@ -1,6 +1,12 @@
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "Shared UI primitives are exported for call sites even when unused by the current binary"
+)]
+
 use leptos::prelude::*;
 use tw_merge::tw_merge;
+
+const UNUSED_PRIMITIVE_EXPORT_SENTINEL: () = ();
 
 #[component]
 pub fn Progress(
@@ -17,9 +23,16 @@ pub fn Progress(
         class
     );
     view! {
-        <div role="progressbar" class=merged_class>
+        <div
+            data-name="Progress"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax=max.to_string()
+            aria-valuenow=move || value.get().to_string()
+            class=merged_class
+        >
             <div
-                class="flex-1 w-full h-full transition-transform duration-300 ease-in-out bg-primary"
+                class="flex-1 w-full h-full transition-all duration-300 ease-in-out bg-primary"
                 style=style
             />
         </div>

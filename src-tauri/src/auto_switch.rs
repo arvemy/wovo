@@ -3,6 +3,9 @@ use crate::domain::account::{AccountSourceKind, AccountSummary};
 use crate::domain::usage::{UsageSnapshot, UsageWindow};
 use std::collections::HashMap;
 
+const AUTO_SWITCH_THRESHOLD_PERCENT: f64 = 90.0;
+const WEEKLY_PENALTY_THRESHOLD: f64 = 20.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UsageWindowKey {
     Primary,
@@ -97,7 +100,7 @@ pub(crate) fn auto_switch_candidate(
     accounts: &[AccountSummary],
     usage_by_account_id: &HashMap<String, UsageSnapshot>,
     errors_by_account_id: &HashMap<String, String>,
-    settings: &CodexSettings,
+    _settings: &CodexSettings,
 ) -> Option<AutoSwitchCandidate> {
     let current = accounts
         .iter()
@@ -112,12 +115,12 @@ pub(crate) fn auto_switch_candidate(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let trigger_remaining = 100.0 - settings.auto_switch_threshold_percent;
+    let trigger_remaining = 100.0 - AUTO_SWITCH_THRESHOLD_PERCENT;
     let min_target_remaining = trigger_remaining + 5.0;
 
     for window_key in UsageWindowKey::all() {
         let trigger_threshold = match window_key {
-            UsageWindowKey::Primary => settings.auto_switch_threshold_percent,
+            UsageWindowKey::Primary => AUTO_SWITCH_THRESHOLD_PERCENT,
             UsageWindowKey::Secondary => 100.0,
         };
         let candidate_threshold = trigger_threshold;
@@ -163,7 +166,7 @@ pub(crate) fn auto_switch_candidate(
             }
 
             let (score, prem, wrem) =
-                compute_switch_score(usage, now_secs, settings.weekly_penalty_threshold);
+                compute_switch_score(usage, now_secs, WEEKLY_PENALTY_THRESHOLD);
 
             match best_target {
                 Some(ref b) if score <= b.score => {}

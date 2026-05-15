@@ -62,7 +62,10 @@ impl AccountSummary {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors the serialized managed-account fields"
+    )]
     pub fn managed(
         id: String,
         email: Option<String>,

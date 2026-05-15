@@ -262,7 +262,7 @@ fn system_reauth_mirror_failure_rolls_back_account_record() {
     .unwrap_err();
     let loaded = store.find_account(&account_id.to_string()).unwrap();
 
-    assert!(matches!(error, AppError::AuthRead(_)));
+    assert!(matches!(error, AppError::AuthWrite(_)));
     assert_eq!(loaded.home_path, old_home.to_string_lossy().to_string());
     assert_eq!(
         load_credentials_from_home(&old_home).unwrap().access_token,

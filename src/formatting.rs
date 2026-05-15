@@ -1,6 +1,33 @@
 use crate::codex_api::{QuotaEvent, QuotaEventKind, QuotaEventSeverity};
 use wasm_bindgen::prelude::JsValue;
 
+pub(crate) fn finite_percent(value: f64) -> Option<f64> {
+    value.is_finite().then(|| value.clamp(0.0, 100.0))
+}
+
+pub(crate) fn format_usage_days(days: f64) -> String {
+    if !days.is_finite() {
+        return "n/a".to_string();
+    }
+
+    if days < 0.1 {
+        "<0.1 day".to_string()
+    } else {
+        let rounded = if days < 10.0 {
+            (days * 10.0).round() / 10.0
+        } else {
+            days.round()
+        };
+        let amount = if rounded < 10.0 && rounded.fract() != 0.0 {
+            format!("{rounded:.1}")
+        } else {
+            format!("{rounded:.0}")
+        };
+        let unit = if amount == "1" { "day" } else { "days" };
+        format!("{amount} {unit}")
+    }
+}
+
 pub(crate) fn is_auth_failure_message(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("401")
@@ -142,10 +169,10 @@ pub(crate) fn format_remaining_time(reset_at: i64) -> String {
     let minutes = (remaining % 3_600) / 60;
 
     if days > 0 {
-        format!("{days}d {hours}h left")
+        format!("resets in {days}d {hours}h")
     } else if hours > 0 {
-        format!("{hours}h {minutes}m left")
+        format!("resets in {hours}h {minutes}m")
     } else {
-        format!("{minutes}m left")
+        format!("resets in {minutes}m")
     }
 }

@@ -1,3 +1,4 @@
+use crate::codex::atomic_file::{replace_file, temporary_file_path, write_new_file};
 use crate::domain::account::AccountSummary;
 use crate::error::AppError;
 use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
@@ -7,7 +8,6 @@ use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -106,9 +106,6 @@ pub fn load_credentials_from_home(home_path: &Path) -> Result<CodexOAuthCredenti
 
 pub fn save_credentials(credentials: &CodexOAuthCredentials) -> Result<(), AppError> {
     let auth_path = credentials.home_path.join("auth.json");
-    if let Some(parent) = auth_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| AppError::AuthRead(error.to_string()))?;
-    }
     let mut root = match fs::read_to_string(&auth_path) {
         Ok(contents) => serde_json::from_str(&contents)
             .map_err(|error| AppError::AuthDecode(error.to_string()))?,
@@ -147,44 +144,21 @@ pub fn replace_auth_json_from_home(source_home: &Path, target_home: &Path) -> Re
 
 fn write_auth_json(auth_path: &Path, contents: &[u8]) -> Result<(), AppError> {
     let parent = auth_path.parent().ok_or_else(|| {
-        AppError::AuthRead(format!(
+        AppError::AuthWrite(format!(
             "auth path has no parent: {}",
             auth_path.to_string_lossy()
         ))
     })?;
-    fs::create_dir_all(parent).map_err(|error| AppError::AuthRead(error.to_string()))?;
+    fs::create_dir_all(parent).map_err(|error| AppError::AuthWrite(error.to_string()))?;
 
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let tmp = parent.join(format!(".auth.json.{nonce}.tmp"));
-    fs::write(&tmp, contents).map_err(|error| AppError::AuthRead(error.to_string()))?;
-    apply_secure_file_permissions(&tmp)?;
-
-    match fs::rename(&tmp, auth_path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            #[cfg(windows)]
-            {
-                if auth_path.exists() {
-                    fs::remove_file(auth_path)
-                        .map_err(|remove_error| AppError::AuthRead(remove_error.to_string()))?;
-                    fs::rename(&tmp, auth_path)
-                        .map_err(|rename_error| AppError::AuthRead(rename_error.to_string()))
-                } else {
-                    let _ = fs::remove_file(&tmp);
-                    Err(AppError::AuthRead(error.to_string()))
-                }
-            }
-
-            #[cfg(not(windows))]
-            {
-                let _ = fs::remove_file(&tmp);
-                Err(AppError::AuthRead(error.to_string()))
-            }
-        }
+    let tmp = temporary_file_path(parent, "auth.json");
+    write_new_file(&tmp, contents).map_err(|error| AppError::AuthWrite(error.to_string()))?;
+    if let Err(error) = apply_secure_file_permissions(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
+
+    replace_file(&tmp, auth_path).map_err(|error| AppError::AuthWrite(error.to_string()))
 }
 
 fn parse_auth_json(contents: &str, home_path: PathBuf) -> Result<CodexOAuthCredentials, AppError> {
@@ -256,7 +230,7 @@ fn dirs_home() -> PathBuf {
 fn apply_secure_file_permissions(path: &Path) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
     let permissions = fs::Permissions::from_mode(0o600);
-    fs::set_permissions(path, permissions).map_err(|error| AppError::AuthRead(error.to_string()))
+    fs::set_permissions(path, permissions).map_err(|error| AppError::AuthWrite(error.to_string()))
 }
 
 #[cfg(not(unix))]

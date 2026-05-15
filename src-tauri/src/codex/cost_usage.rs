@@ -1,4 +1,5 @@
 use crate::codex::account_store::default_wovo_codex_root;
+use crate::codex::atomic_file::{replace_file, temporary_file_path, write_new_file};
 use crate::domain::usage::{CostUsageDailyPoint, CostUsageSnapshot};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
@@ -970,40 +971,18 @@ fn save_cache(cache_root: &Path, cache: &CostUsageCache) -> Result<(), AppError>
     fs::create_dir_all(parent).map_err(|error| AppError::AccountStore(error.to_string()))?;
     let contents =
         serde_json::to_vec(cache).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    let tmp = parent.join(format!(".{CACHE_FILE_NAME}.{}.tmp", unique_nonce()));
-    fs::write(&tmp, contents).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    apply_secure_file_permissions(&tmp)?;
-    replace_file(&tmp, &path)?;
+    let tmp = temporary_file_path(parent, CACHE_FILE_NAME);
+    write_new_file(&tmp, &contents).map_err(|error| AppError::AccountStore(error.to_string()))?;
+    if let Err(error) = apply_secure_file_permissions(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    replace_file(&tmp, &path).map_err(|error| AppError::AccountStore(error.to_string()))?;
     Ok(())
 }
 
 fn cache_path(cache_root: &Path) -> PathBuf {
     cache_root.join("cost-usage").join(CACHE_FILE_NAME)
-}
-
-fn replace_file(tmp: &Path, target: &Path) -> Result<(), AppError> {
-    match fs::rename(tmp, target) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            #[cfg(windows)]
-            {
-                if target.exists() {
-                    fs::remove_file(target)
-                        .map_err(|remove_error| AppError::AccountStore(remove_error.to_string()))?;
-                    fs::rename(tmp, target)
-                        .map_err(|rename_error| AppError::AccountStore(rename_error.to_string()))
-                } else {
-                    let _ = fs::remove_file(tmp);
-                    Err(AppError::AccountStore(error.to_string()))
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = fs::remove_file(tmp);
-                Err(AppError::AccountStore(error.to_string()))
-            }
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -1017,13 +996,6 @@ fn apply_secure_file_permissions(path: &Path) -> Result<(), AppError> {
 #[cfg(not(unix))]
 fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError> {
     Ok(())
-}
-
-fn unique_nonce() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default()
 }
 
 fn metadata_mtime_ms(metadata: &fs::Metadata) -> i64 {

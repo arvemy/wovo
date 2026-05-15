@@ -265,7 +265,7 @@ impl ManagedCodexAccountStore {
             .ok_or_else(|| AppError::UnknownAccount(account_id.to_string()))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn upsert_authenticated_account(
         &self,
         preferred_id: Uuid,
@@ -283,7 +283,6 @@ impl ManagedCodexAccountStore {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn upsert_authenticated_account_with_workspace(
         &self,
         preferred_id: Uuid,
@@ -384,30 +383,10 @@ impl ManagedCodexAccountStore {
         Ok((record, replaced_home_paths))
     }
 
-    #[allow(dead_code)]
-    pub fn upsert_authenticated_account_and_then<F>(
-        &self,
-        preferred_id: Uuid,
-        email: Option<String>,
-        provider_account_id: Option<String>,
-        home_path: PathBuf,
-        after_upsert: F,
-    ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError>
-    where
-        F: FnOnce(&ManagedCodexAccountRecord) -> Result<(), AppError>,
-    {
-        self.upsert_authenticated_account_with_workspace_and_then(
-            preferred_id,
-            email,
-            provider_account_id,
-            None,
-            None,
-            home_path,
-            after_upsert,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transactional upsert keeps identity fields explicit before rollback handling"
+    )]
     pub fn upsert_authenticated_account_with_workspace_and_then<F>(
         &self,
         preferred_id: Uuid,
