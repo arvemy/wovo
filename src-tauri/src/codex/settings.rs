@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SETTINGS_FILE_NAME: &str = "codex-settings.json";
 
@@ -182,13 +183,50 @@ fn load_settings_from_path_with_codex_home(
 }
 
 fn save_settings_to_path(path: &Path, settings: &CodexSettings) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    }
     let contents = serde_json::to_string_pretty(settings)
         .map_err(|error| AppError::AccountStore(error.to_string()))?;
-    fs::write(path, contents).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    apply_secure_file_permissions(path)
+    write_settings_file(path, contents.as_bytes())
+}
+
+fn write_settings_file(path: &Path, contents: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent().ok_or_else(|| {
+        AppError::AccountStore(format!(
+            "settings path has no parent: {}",
+            path.to_string_lossy()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| AppError::AccountStore(error.to_string()))?;
+
+    let tmp = parent.join(format!(".{SETTINGS_FILE_NAME}.{}.tmp", unique_nonce()));
+    fs::write(&tmp, contents).map_err(|error| AppError::AccountStore(error.to_string()))?;
+    apply_secure_file_permissions(&tmp)?;
+    replace_file(&tmp, path)
+}
+
+fn replace_file(tmp: &Path, target: &Path) -> Result<(), AppError> {
+    match fs::rename(tmp, target) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            #[cfg(windows)]
+            {
+                if target.exists() {
+                    fs::remove_file(target)
+                        .map_err(|remove_error| AppError::AccountStore(remove_error.to_string()))?;
+                    fs::rename(tmp, target)
+                        .map_err(|rename_error| AppError::AccountStore(rename_error.to_string()))
+                } else {
+                    let _ = fs::remove_file(tmp);
+                    Err(AppError::AccountStore(error.to_string()))
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                let _ = fs::remove_file(tmp);
+                Err(AppError::AccountStore(error.to_string()))
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -202,6 +240,13 @@ fn apply_secure_file_permissions(path: &Path) -> Result<(), AppError> {
 #[cfg(not(unix))]
 fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError> {
     Ok(())
+}
+
+fn unique_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

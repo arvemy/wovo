@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
@@ -108,10 +109,12 @@ pub fn save_credentials(credentials: &CodexOAuthCredentials) -> Result<(), AppEr
     if let Some(parent) = auth_path.parent() {
         fs::create_dir_all(parent).map_err(|error| AppError::AuthRead(error.to_string()))?;
     }
-    let contents =
-        fs::read_to_string(&auth_path).map_err(|error| AppError::AuthRead(error.to_string()))?;
-    let mut root: Value =
-        serde_json::from_str(&contents).map_err(|error| AppError::AuthDecode(error.to_string()))?;
+    let mut root = match fs::read_to_string(&auth_path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map_err(|error| AppError::AuthDecode(error.to_string()))?,
+        Err(error) if error.kind() == ErrorKind::NotFound => Value::Object(Default::default()),
+        Err(error) => return Err(AppError::AuthRead(error.to_string())),
+    };
 
     let tokens = AuthTokens {
         access_token: Some(credentials.access_token.clone()),
@@ -264,6 +267,22 @@ fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn temp_home(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("wovo-auth-{name}-{}", Uuid::new_v4()))
+    }
+
+    fn test_credentials(home_path: PathBuf) -> CodexOAuthCredentials {
+        CodexOAuthCredentials {
+            access_token: "new-access".to_string(),
+            refresh_token: "new-refresh".to_string(),
+            id_token: Some("header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.signature".to_string()),
+            account_id: Some("account-123".to_string()),
+            last_refresh: Some(OffsetDateTime::from_unix_timestamp(1_777_000_000).unwrap()),
+            home_path,
+        }
+    }
 
     #[test]
     fn parses_valid_auth_json() {
@@ -289,5 +308,21 @@ mod tests {
     fn rejects_tokenless_auth_json() {
         let error = parse_auth_json(r#"{"tokens": {}}"#, PathBuf::from("/tmp/codex")).unwrap_err();
         assert!(matches!(error, AppError::MissingTokens));
+    }
+
+    #[test]
+    fn save_credentials_creates_missing_auth_json() {
+        let home = temp_home("missing-auth-json");
+        let credentials = test_credentials(home.clone());
+
+        save_credentials(&credentials).unwrap();
+
+        let loaded = load_credentials_from_home(&home).unwrap();
+        assert_eq!(loaded.access_token, "new-access");
+        assert_eq!(loaded.refresh_token, "new-refresh");
+        assert_eq!(loaded.account_id.as_deref(), Some("account-123"));
+        assert_eq!(loaded.email().as_deref(), Some("test@example.com"));
+        assert!(loaded.last_refresh.is_some());
+        let _ = fs::remove_dir_all(home);
     }
 }
