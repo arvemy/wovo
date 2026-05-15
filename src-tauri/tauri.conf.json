@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFMDFCMzU5NzBBMDYyNDAKUldSQVlxQndXYk1CYmtxeDRHdzlORWs0U0FCSFhMZ1ByWGoybTNpRGJLNFBtTU5Za2dRVktTWmUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCRDA2M0U4MDUzQzdEOUMKUldTY2ZUd0Y2R1BRTzBJSjZheE9yME9NeDZuR2NjODNSbzRqeVFhd21oUEFNU0pnMkZBQmZKekkK",
       "endpoints": [
         "https://github.com/arvemy/wovo/releases/latest/download/latest.json"
       ],

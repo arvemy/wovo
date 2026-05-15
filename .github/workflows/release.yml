@@ -29,6 +29,18 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release version
+        run: node scripts/validate-release-version.mjs "${{ github.ref_name }}"
+
+      - name: Validate updater signing secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/validate-updater-signing-secrets.mjs
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,12 +58,6 @@ jobs:
         uses: jetli/trunk-action@v0.5.0
         with:
           version: latest
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Validate release version
-        run: node scripts/validate-release-version.mjs "${{ github.ref_name }}"
 
       - name: Build CSS
         run: pnpm run build:css
