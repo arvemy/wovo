@@ -1,5 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -33,7 +35,6 @@ fn replace_file_inner(tmp: &Path, target: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn replace_file_inner(tmp: &Path, target: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
