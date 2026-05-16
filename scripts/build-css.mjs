@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 
-const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const isWindows = process.platform === "win32";
+const command = isWindows ? "pnpm.cmd" : "pnpm";
 const child = spawn(command, ["run", "build:css"], {
   env: process.env,
+  shell: isWindows,
   stdio: "inherit",
 });
 

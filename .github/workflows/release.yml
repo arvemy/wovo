@@ -83,15 +83,15 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          - platform: windows-latest
+            args: ''
+            rust-targets: wasm32-unknown-unknown
           - platform: macos-latest
             args: --target aarch64-apple-darwin
             rust-targets: aarch64-apple-darwin,wasm32-unknown-unknown
           - platform: macos-15-intel
             args: --target x86_64-apple-darwin
             rust-targets: x86_64-apple-darwin,wasm32-unknown-unknown
-          - platform: windows-latest
-            args: ''
-            rust-targets: wasm32-unknown-unknown
           - platform: ubuntu-22.04
             args: --bundles deb,rpm,appimage
             rust-targets: wasm32-unknown-unknown
