@@ -10,5 +10,5 @@ open = false
 
 [[hooks]]
 stage = "pre_build"
-command = "pnpm"
-command_arguments = ["run", "build:css"]
+command = "node"
+command_arguments = ["./scripts/build-css.mjs"]
