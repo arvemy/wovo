@@ -10,7 +10,7 @@ if (args.length === 0) {
 
 // Trunk's color parser rejects common NO_COLOR values such as "1".
 const env = { ...process.env, NO_COLOR: "true" };
-const command = process.platform === "win32" ? "trunk.cmd" : "trunk";
+const command = process.platform === "win32" ? "trunk.exe" : "trunk";
 const child = spawn(command, args, { env, stdio: "inherit" });
 
 child.on("error", (error) => {
