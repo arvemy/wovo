@@ -137,6 +137,24 @@ body {
   animation-duration: 0ms !important;
 }
 
+@layer components {
+  .usage-meter-fill {
+    @apply h-full min-w-0.5 rounded-full transition-colors duration-300 ease-in-out;
+  }
+
+  .usage-meter-fill-success {
+    background: var(--success);
+  }
+
+  .usage-meter-fill-warning {
+    background: var(--warning);
+  }
+
+  .usage-meter-fill-critical {
+    background: var(--critical);
+  }
+}
+
 @media (max-height: 680px), (max-width: 760px) {
   .app-shell {
     gap: 0.5rem;

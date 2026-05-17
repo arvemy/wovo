@@ -1,12 +1,16 @@
-use crate::app::AutoSwitchRunwayEstimate;
-use crate::codex_api::{CodexUsageSourceMode, NotificationStatus};
+use crate::auto_switch_runway::AutoSwitchRunwayEstimate;
+use crate::codex_api::{
+    invoke_tauri, CodexUsageSourceMode, NotificationSettingsOpenResult, NotificationStatus,
+};
 use crate::formatting::{format_time_ago, format_usage_days};
 use crate::theme::ThemeMode;
 use crate::ui::button::{ButtonClass, ButtonSize, ButtonVariant};
 use crate::ui::switch::Switch;
 use icons::{Monitor, Moon, Sun, X};
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use tw_merge::IntoTailwindClass;
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 
 #[expect(
     clippy::too_many_arguments,
@@ -30,6 +34,7 @@ pub fn SettingsPanel(
     #[prop(into)] notification_status: Signal<Option<NotificationStatus>>,
     #[prop(into)] is_notification_test_sending: Signal<bool>,
     on_send_test_notification: Box<dyn Fn() + Send + Sync>,
+    on_refresh_notification_status: Box<dyn Fn() + Send + Sync>,
     // Privacy
     #[prop(into)] hide_account_credentials: Signal<bool>,
     on_change_hide_credentials: Box<dyn Fn(bool) + Send + Sync>,
@@ -49,9 +54,30 @@ pub fn SettingsPanel(
     let on_change_cost_usage = StoredValue::new(on_change_cost_usage);
     let on_change_notifications = StoredValue::new(on_change_notifications);
     let on_send_test_notification = StoredValue::new(on_send_test_notification);
+    let on_refresh_notification_status = StoredValue::new(on_refresh_notification_status);
     let on_change_hide_credentials = StoredValue::new(on_change_hide_credentials);
     let on_change_launch_on_login = StoredValue::new(on_change_launch_on_login);
     let on_change_auto_switching = StoredValue::new(on_change_auto_switching);
+    let (notification_settings_message, set_notification_settings_message) =
+        signal::<Option<String>>(None);
+    let (refresh_notification_status_on_focus, set_refresh_notification_status_on_focus) =
+        signal(false);
+
+    if let Some(window) = web_sys::window() {
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if refresh_notification_status_on_focus.get_untracked() {
+                set_refresh_notification_status_on_focus.set(false);
+                on_refresh_notification_status.with_value(|f| f());
+            }
+        });
+
+        if window
+            .add_event_listener_with_callback("focus", handler.as_ref().unchecked_ref())
+            .is_ok()
+        {
+            handler.forget();
+        }
+    }
 
     let panel_class = move || {
         let base = "fixed top-0 right-0 z-50 flex h-full flex-col border-l border-border bg-background shadow-xl transition-transform duration-200 ease-in-out";
@@ -187,6 +213,9 @@ pub fn SettingsPanel(
                     {move || notification_status.get().map(|status| {
                         let status_text = notification_status_text(&status);
                         let test_available = status.test_available;
+                        let rationale_required = status.rationale_required;
+                        let show_settings_action =
+                            status.permission_state.is_denied() && status.settings_action_available;
                         view! {
                             <div class="mt-2 rounded-md border border-border bg-secondary/40 p-2">
                                 <div class="flex items-start justify-between gap-2">
@@ -197,6 +226,8 @@ pub fn SettingsPanel(
                                         <button
                                             class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("h-7 shrink-0 px-2 text-[11px]")
                                             type="button"
+                                            aria-label="Send test notification"
+                                            aria-busy=move || is_notification_test_sending.get().to_string()
                                             disabled=move || is_notification_test_sending.get()
                                             on:click=move |_| on_send_test_notification.with_value(|f| f())
                                         >
@@ -204,6 +235,47 @@ pub fn SettingsPanel(
                                         </button>
                                     })}
                                 </div>
+                                {move || rationale_required.then(|| view! {
+                                    <p class="mt-2 text-[11px] leading-4 text-muted-foreground">
+                                        "Wovo uses notifications only for quota and auto-switch alerts. Your OS may ask for permission before banners can appear."
+                                    </p>
+                                })}
+                                {move || show_settings_action.then(|| view! {
+                                    <div class="mt-2 flex flex-wrap items-center gap-2">
+                                        <button
+                                            class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("h-7 px-2 text-[11px]")
+                                            type="button"
+                                            on:click=move |_| {
+                                                spawn_local(async move {
+                                                    let result = invoke_tauri::<NotificationSettingsOpenResult>(
+                                                        "open_notification_settings",
+                                                        JsValue::UNDEFINED,
+                                                    ).await;
+                                                    let refresh_on_focus = result
+                                                        .as_ref()
+                                                        .map(|result| result.opened)
+                                                        .unwrap_or(false);
+                                                    let message = result
+                                                        .map(|result| result.user_message)
+                                                        .unwrap_or_else(|error| error.user_message);
+                                                    set_notification_settings_message.set(Some(message));
+                                                    if refresh_on_focus {
+                                                        set_refresh_notification_status_on_focus.set(true);
+                                                    }
+                                                    on_refresh_notification_status.with_value(|f| f());
+                                                });
+                                            }
+                                        >
+                                            "Go to Settings"
+                                        </button>
+                                        <p class="text-[11px] text-muted-foreground">
+                                            "Enable notifications for WoVo in system settings."
+                                        </p>
+                                    </div>
+                                })}
+                                {move || notification_settings_message.get().map(|message| view! {
+                                    <p class="mt-2 text-[11px] text-muted-foreground">{message}</p>
+                                })}
                             </div>
                         }
                     })}
@@ -267,6 +339,13 @@ pub fn SettingsPanel(
 }
 
 fn notification_status_text(status: &NotificationStatus) -> String {
+    if status.permission_state.is_denied() {
+        return "Notifications are denied by the operating system.".to_string();
+    }
+    if status.permission_state.needs_rationale() {
+        return "Notifications need permission before Wovo can show quota alerts.".to_string();
+    }
+
     let diagnostics = &status.diagnostics;
     let Some(attempted_at) = diagnostics.last_attempt_at else {
         return "No notification attempt recorded yet.".to_string();

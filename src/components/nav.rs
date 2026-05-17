@@ -5,11 +5,11 @@ use leptos::prelude::*;
 use tw_merge::IntoTailwindClass;
 
 #[component]
-pub fn AppNav<A, IL, IAL, ANFL, ISO>(
+pub fn AppNav<A, IL, ILL, ANFL, ISO>(
     active_provider: A,
     on_select_provider: Box<dyn Fn(ProviderPage) + Send + Sync>,
     is_listing: IL,
-    is_account_action_loading: IAL,
+    is_account_login_loading: ILL,
     any_action_in_flight: ANFL,
     any_loading: Memo<bool>,
     is_settings_open: ISO,
@@ -21,13 +21,13 @@ pub fn AppNav<A, IL, IAL, ANFL, ISO>(
 where
     A: Fn() -> ProviderPage + Send + Sync + 'static,
     IL: Fn() -> bool + Send + Sync + 'static,
-    IAL: Fn() -> bool + Send + Sync + 'static,
+    ILL: Fn() -> bool + Send + Sync + 'static,
     ANFL: Fn() -> bool + Send + Sync + 'static,
     ISO: Fn() -> bool + Send + Sync + 'static,
 {
     let on_select_provider = StoredValue::new(on_select_provider);
     let is_listing = StoredValue::new(is_listing);
-    let is_account_action_loading = StoredValue::new(is_account_action_loading);
+    let is_account_login_loading = StoredValue::new(is_account_login_loading);
     let any_action_in_flight = StoredValue::new(any_action_in_flight);
     let is_settings_open = StoredValue::new(is_settings_open);
     let on_open_settings = StoredValue::new(on_open_settings);
@@ -47,22 +47,38 @@ where
                     class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                     type="button"
                     aria-label=move || {
-                        if is_account_action_loading.with_value(|f| f()) {
+                        if is_account_login_loading.with_value(|f| f()) {
                             "Cancel login"
                         } else {
                             "Add Codex account"
                         }
                     }
-                    disabled=move || is_listing.with_value(|f| f())
+                    aria-busy=move || is_account_login_loading.with_value(|f| f()).to_string()
+                    aria-disabled=move || {
+                        let login_loading = is_account_login_loading.with_value(|f| f());
+                        (!login_loading && (
+                            is_listing.with_value(|f| f())
+                                || any_action_in_flight.with_value(|f| f())
+                        )).to_string()
+                    }
+                    disabled=move || {
+                        let login_loading = is_account_login_loading.with_value(|f| f());
+                        !login_loading && (
+                            is_listing.with_value(|f| f())
+                                || any_action_in_flight.with_value(|f| f())
+                        )
+                    }
                     on:click=move |_| {
-                        if is_account_action_loading.with_value(|f| f()) {
+                        if is_account_login_loading.with_value(|f| f()) {
                             on_cancel_login.with_value(|f| f());
-                        } else {
+                        } else if !is_listing.with_value(|f| f())
+                            && !any_action_in_flight.with_value(|f| f())
+                        {
                             on_add_account.with_value(|f| f());
                         }
                     }
                 >
-                    {move || if is_account_action_loading.with_value(|f| f()) {
+                    {move || if is_account_login_loading.with_value(|f| f()) {
                         view! { <LoaderCircle class="size-4 animate-spin"/> }.into_any()
                     } else {
                         view! { <Plus class="size-4"/> }.into_any()
@@ -74,6 +90,8 @@ where
                     class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                     type="button"
                     aria-label="Refresh all accounts"
+                    aria-busy=move || (is_listing.with_value(|f| f()) || any_loading.get()).to_string()
+                    aria-disabled=move || (is_listing.with_value(|f| f()) || any_action_in_flight.with_value(|f| f())).to_string()
                     disabled=move || is_listing.with_value(|f| f()) || any_action_in_flight.with_value(|f| f())
                     on:click=move |_| on_refresh.with_value(|f| f())
                 >

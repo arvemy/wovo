@@ -1,8 +1,12 @@
 use crate::auto_switch::AutoSwitchNotification;
 use crate::domain::usage::{QuotaEvent, QuotaEventKind};
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
+
+#[cfg(target_os = "linux")]
+const LINUX_NOTIFICATION_SETTINGS_COMMAND: &str = "gnome-control-center";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexNotification {
@@ -30,6 +34,26 @@ pub(crate) struct NotificationDiagnostics {
 pub(crate) struct NotificationStatus {
     pub(crate) diagnostics: NotificationDiagnostics,
     pub(crate) test_available: bool,
+    pub(crate) permission_state: NotificationPermissionState,
+    pub(crate) rationale_required: bool,
+    pub(crate) settings_action_available: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum NotificationPermissionState {
+    Unknown,
+    Granted,
+    Prompt,
+    Denied,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NotificationSettingsOpenResult {
+    pub(crate) opened: bool,
+    pub(crate) user_message: String,
 }
 
 #[derive(Default)]
@@ -41,7 +65,10 @@ impl NotificationDiagnosticsState {
     fn current(&self) -> NotificationDiagnostics {
         match self.latest.lock() {
             Ok(latest) => latest.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
+            Err(poisoned) => {
+                eprintln!("notification diagnostics mutex was poisoned; recovering current value");
+                poisoned.into_inner().clone()
+            }
         }
     }
 
@@ -51,6 +78,7 @@ impl NotificationDiagnosticsState {
                 *latest = diagnostics;
             }
             Err(poisoned) => {
+                eprintln!("notification diagnostics mutex was poisoned; recovering record path");
                 *poisoned.into_inner() = diagnostics;
             }
         }
@@ -58,9 +86,13 @@ impl NotificationDiagnosticsState {
 }
 
 pub(crate) fn notification_status(app: &AppHandle) -> NotificationStatus {
+    let permission_state = notification_permission_state(app);
     NotificationStatus {
         diagnostics: current_diagnostics(app),
         test_available: tauri::is_dev(),
+        permission_state,
+        rationale_required: permission_state == NotificationPermissionState::Prompt,
+        settings_action_available: notification_settings_action_available(),
     }
 }
 
@@ -76,7 +108,14 @@ pub(crate) async fn send_test_notification(app: &AppHandle) -> NotificationStatu
     NotificationStatus {
         diagnostics,
         test_available: tauri::is_dev(),
+        permission_state: notification_permission_state(app),
+        rationale_required: false,
+        settings_action_available: notification_settings_action_available(),
     }
+}
+
+pub(crate) fn open_notification_settings() -> NotificationSettingsOpenResult {
+    platform_open_notification_settings()
 }
 
 #[cfg(target_os = "linux")]
@@ -284,6 +323,112 @@ fn show_notification_with_mode(
     };
     record_diagnostics(app, diagnostics.clone());
     diagnostics
+}
+
+fn notification_permission_state(app: &AppHandle) -> NotificationPermissionState {
+    if !requires_tauri_permission_check(NotificationMode::Normal) {
+        return NotificationPermissionState::Unsupported;
+    }
+
+    use tauri_plugin_notification::{NotificationExt, PermissionState};
+    match app.notification().permission_state() {
+        Ok(PermissionState::Granted) => NotificationPermissionState::Granted,
+        Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
+            NotificationPermissionState::Prompt
+        }
+        Ok(PermissionState::Denied) => NotificationPermissionState::Denied,
+        Err(error) => {
+            eprintln!("notification permission state could not be read: {error}");
+            NotificationPermissionState::Unknown
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn notification_settings_action_available() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn notification_settings_action_available() -> bool {
+    command_available(LINUX_NOTIFICATION_SETTINGS_COMMAND)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn notification_settings_action_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn command_available(command: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    command_available_in_paths(command, std::env::split_paths(&paths))
+}
+
+#[cfg(target_os = "linux")]
+fn command_available_in_paths(
+    command: &str,
+    paths: impl IntoIterator<Item = std::path::PathBuf>,
+) -> bool {
+    paths.into_iter().any(|directory| {
+        let candidate = directory.join(command);
+        std::fs::metadata(candidate)
+            .map(|metadata| {
+                use std::os::unix::fs::PermissionsExt;
+
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn platform_open_notification_settings() -> NotificationSettingsOpenResult {
+    let opened = Command::new("cmd")
+        .args(["/C", "start", "", "ms-settings:notifications"])
+        .spawn()
+        .is_ok();
+    notification_settings_result(opened)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_open_notification_settings() -> NotificationSettingsOpenResult {
+    let opened = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.notifications")
+        .spawn()
+        .is_ok();
+    notification_settings_result(opened)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_open_notification_settings() -> NotificationSettingsOpenResult {
+    let opened = Command::new(LINUX_NOTIFICATION_SETTINGS_COMMAND)
+        .arg("notifications")
+        .spawn()
+        .is_ok();
+    notification_settings_result(opened)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn platform_open_notification_settings() -> NotificationSettingsOpenResult {
+    NotificationSettingsOpenResult {
+        opened: false,
+        user_message: "Open your system notification settings manually.".to_string(),
+    }
+}
+
+fn notification_settings_result(opened: bool) -> NotificationSettingsOpenResult {
+    NotificationSettingsOpenResult {
+        opened,
+        user_message: if opened {
+            "Opened system notification settings.".to_string()
+        } else {
+            "Open your system notification settings manually.".to_string()
+        },
+    }
 }
 
 #[cfg(target_os = "linux")]

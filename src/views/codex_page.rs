@@ -1,13 +1,11 @@
-use std::collections::{HashMap, HashSet};
-
-use crate::codex_api::{
-    AccountSourceKind, AccountSummary, CostUsageSnapshot, QuotaEvent, UsageSnapshot,
-};
+use crate::app_context::{AppUiState, CodexOverviewState, SettingsState};
+use crate::codex_api::{AccountSourceKind, QuotaEvent};
 use crate::components::account_card::AccountCard;
 use crate::components::cost_summary::CostSummary;
 use crate::components::quota_event_card::QuotaEventCard;
 use crate::formatting::format_time_ago;
 use crate::ui::badge::{Badge, BadgeSize, BadgeVariant};
+use crate::ui::skeleton::Skeleton;
 use icons::LoaderCircle;
 use leptos::prelude::*;
 
@@ -17,19 +15,8 @@ use leptos::prelude::*;
 )]
 #[component]
 pub fn CodexPage<AAF>(
-    #[prop(into)] accounts: Signal<Vec<AccountSummary>>,
-    #[prop(into)] usage_by_id: Signal<HashMap<String, UsageSnapshot>>,
-    #[prop(into)] errors_by_id: Signal<HashMap<String, String>>,
-    #[prop(into)] loading_ids: Signal<HashSet<String>>,
-    #[prop(into)] reauth_ids: Signal<HashSet<String>>,
     visible_quota_events: Memo<Vec<QuotaEvent>>,
-    #[prop(into)] cost_usage: Signal<Option<CostUsageSnapshot>>,
-    #[prop(into)] cost_error: Signal<Option<String>>,
-    #[prop(into)] hide_account_credentials: Signal<bool>,
-    #[prop(into)] revealed_credential: Signal<Option<String>>,
-    #[prop(into)] snapshot_stale: Signal<bool>,
     any_loading: Memo<bool>,
-    #[prop(into)] is_listing: Signal<bool>,
     latest_updated_at: Memo<Option<i64>>,
     any_action_in_flight: AAF,
     on_dismiss_quota_event: Box<dyn Fn(String) + Send + Sync>,
@@ -47,6 +34,20 @@ where
     let on_remove_account = StoredValue::new(on_remove_account);
     let on_reauth = StoredValue::new(on_reauth);
     let any_action_in_flight = StoredValue::new(any_action_in_flight);
+    let overview = expect_context::<CodexOverviewState>();
+    let settings = expect_context::<SettingsState>();
+    let ui = expect_context::<AppUiState>();
+    let accounts = overview.accounts;
+    let usage_by_id = overview.usage_by_id;
+    let errors_by_id = overview.errors_by_id;
+    let loading_ids = overview.loading_ids;
+    let reauth_ids = overview.reauth_ids;
+    let cost_usage = overview.cost_usage;
+    let cost_error = overview.cost_error;
+    let snapshot_stale = overview.snapshot_stale;
+    let revealed_credential = overview.revealed_credential;
+    let hide_account_credentials = settings.hide_account_credentials;
+    let is_listing = ui.is_listing;
 
     view! {
         <main class="codex-page flex min-h-0 flex-1 flex-col overflow-visible">
@@ -100,9 +101,13 @@ where
                     if current.is_empty() {
                         if is_listing.get() {
                             view! {
-                                <div class="flex flex-col items-center justify-center gap-2 py-12 text-center">
-                                    <LoaderCircle class="size-4 animate-spin text-muted-foreground"/>
-                                    <p class="text-xs font-medium text-muted-foreground">"Checking Codex"</p>
+                                <div class="grid gap-3 py-2" aria-busy="true">
+                                    <Skeleton class="h-24 w-full"/>
+                                    <Skeleton class="h-24 w-full"/>
+                                    <div class="flex items-center justify-center gap-2 py-4 text-center">
+                                        <LoaderCircle class="size-4 animate-spin text-muted-foreground"/>
+                                        <p class="text-xs font-medium text-muted-foreground">"Checking Codex"</p>
+                                    </div>
                                 </div>
                             }.into_any()
                         } else {
@@ -173,7 +178,9 @@ where
                                                         .unwrap_or(fallback_can_remove)
                                                 })
                                                 usage=move || usage_by_id.with(|map| map.get(&id_usage).cloned())
-                                                error=move || errors_by_id.with(|map| map.get(&id_error).cloned())
+                                                error=move || errors_by_id.with(|map| {
+                                                    map.get(&id_error).map(|issue| issue.user_message.clone())
+                                                })
                                                 is_loading=move || loading_ids.with(|set| set.contains(&id_loading))
                                                 reauth_required=move || reauth_ids.with(|set| set.contains(&id_reauth))
                                                 disabled=move || any_action_in_flight.with_value(|f| f())

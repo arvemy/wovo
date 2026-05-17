@@ -6,6 +6,8 @@ WoVo is a Tauri 2 + Leptos desktop app for monitoring Codex account usage, quota
 
 ```sh
 pnpm install
+rustup target add wasm32-unknown-unknown
+cargo install trunk
 pnpm run tauri:dev
 ```
 

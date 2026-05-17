@@ -10,8 +10,14 @@ fn oauth_auto_fallback_is_limited_to_auth_class_errors() {
     assert!(oauth_error_allows_cli_fallback(&AppError::TokenRefresh(
         "status 401".to_string()
     )));
+    assert!(oauth_error_allows_cli_fallback(&AppError::TokenRefresh(
+        "status 403".to_string()
+    )));
     assert!(oauth_error_allows_cli_fallback(&AppError::UsageFetch(
         "status 401".to_string()
+    )));
+    assert!(oauth_error_allows_cli_fallback(&AppError::UsageFetch(
+        "status 403".to_string()
     )));
     assert!(!oauth_error_allows_cli_fallback(&AppError::UsageFetch(
         "status 429".to_string()

@@ -5,8 +5,14 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(module = "/src/tauri_bridge.js")]
 extern "C" {
-    #[wasm_bindgen(catch)]
-    async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = invokeWithPolicy)]
+    async fn invoke_with_policy(
+        cmd: &str,
+        args: JsValue,
+        timeout_ms: u32,
+        retries: u32,
+        retry_delay_ms: u32,
+    ) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(catch)]
     async fn listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
@@ -117,6 +123,36 @@ pub(crate) struct NotificationDiagnostics {
 pub(crate) struct NotificationStatus {
     pub(crate) diagnostics: NotificationDiagnostics,
     pub(crate) test_available: bool,
+    pub(crate) permission_state: NotificationPermissionState,
+    pub(crate) rationale_required: bool,
+    pub(crate) settings_action_available: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum NotificationPermissionState {
+    Unknown,
+    Granted,
+    Prompt,
+    Denied,
+    Unsupported,
+}
+
+impl NotificationPermissionState {
+    pub(crate) fn is_denied(self) -> bool {
+        matches!(self, Self::Denied)
+    }
+
+    pub(crate) fn needs_rationale(self) -> bool {
+        matches!(self, Self::Prompt)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NotificationSettingsOpenResult {
+    pub(crate) opened: bool,
+    pub(crate) user_message: String,
 }
 
 #[derive(Serialize)]
@@ -200,13 +236,25 @@ pub(crate) struct CostUsageSnapshot {
 pub(crate) struct CodexOverviewSnapshot {
     pub(crate) accounts: Vec<AccountSummary>,
     pub(crate) usage_by_account_id: HashMap<String, UsageSnapshot>,
-    pub(crate) errors_by_account_id: HashMap<String, String>,
+    pub(crate) errors_by_account_id: HashMap<String, AccountIssue>,
     #[serde(default)]
     pub(crate) quota_events: Vec<QuotaEvent>,
     pub(crate) cost_usage: Option<CostUsageSnapshot>,
     pub(crate) cost_error: Option<String>,
     pub(crate) generated_at: i64,
     pub(crate) stale: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountIssue {
+    #[expect(
+        dead_code,
+        reason = "error codes are retained for non-string UI decisions as surfaces grow"
+    )]
+    pub(crate) code: String,
+    pub(crate) user_message: String,
+    pub(crate) auth_related: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -241,12 +289,20 @@ struct AccountActionArgs<'a> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CommandError {
-    pub(crate) message: String,
+    #[expect(
+        dead_code,
+        reason = "callers currently show only user_message but code stays in the IPC contract"
+    )]
+    pub(crate) code: String,
+    pub(crate) user_message: String,
 }
 
 impl CommandError {
     pub(crate) fn from_message(message: String) -> Self {
-        Self { message }
+        Self {
+            code: "client_error".to_string(),
+            user_message: message,
+        }
     }
 }
 
@@ -269,9 +325,16 @@ pub(crate) async fn invoke_tauri<T>(cmd: &str, args: JsValue) -> Result<T, Comma
 where
     T: DeserializeOwned,
 {
-    let value = invoke(cmd, args)
-        .await
-        .map_err(|error| js_command_error(&error))?;
+    let policy = policy_for_command(cmd);
+    let value = invoke_with_policy(
+        cmd,
+        args,
+        policy.timeout_ms,
+        policy.retries,
+        policy.retry_delay_ms,
+    )
+    .await
+    .map_err(|error| js_command_error(&error))?;
     serde_wasm_bindgen::from_value(value)
         .map_err(|error| CommandError::from_message(error.to_string()))
 }
@@ -284,11 +347,98 @@ pub(crate) async fn listen_tauri(
 }
 
 pub(crate) fn js_command_error(value: &JsValue) -> CommandError {
-    let message = js_sys::Reflect::get(value, &JsValue::from_str("message"))
+    let code = js_sys::Reflect::get(value, &JsValue::from_str("code"))
         .ok()
         .and_then(|value| value.as_string())
+        .unwrap_or_else(|| "unknown_error".to_string());
+    let user_message = js_sys::Reflect::get(value, &JsValue::from_str("userMessage"))
+        .ok()
+        .and_then(|value| value.as_string())
+        .or_else(|| {
+            js_sys::Reflect::get(value, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|value| value.as_string())
+        })
         .or_else(|| value.as_string())
         .unwrap_or_else(|| "Wovo could not complete the request.".to_string());
 
-    CommandError { message }
+    CommandError { code, user_message }
+}
+
+#[derive(Clone, Copy)]
+struct InvokePolicy {
+    timeout_ms: u32,
+    retries: u32,
+    retry_delay_ms: u32,
+}
+
+fn policy_for_command(cmd: &str) -> InvokePolicy {
+    match cmd {
+        "get_cached_codex_snapshot"
+        | "get_codex_settings"
+        | "get_codex_notification_status"
+        | "check_app_update" => InvokePolicy {
+            timeout_ms: 10_000,
+            retries: 2,
+            retry_delay_ms: 1_000,
+        },
+        "refresh_codex_snapshot" | "refresh_codex_usage" | "refresh_all_usage" => InvokePolicy {
+            timeout_ms: 60_000,
+            retries: 0,
+            retry_delay_ms: 0,
+        },
+        "set_codex_usage_source_mode"
+        | "set_codex_cost_usage_enabled"
+        | "set_codex_notifications_enabled"
+        | "set_codex_auto_account_switching_enabled"
+        | "set_codex_hide_account_credentials"
+        | "set_codex_launch_on_login"
+        | "open_notification_settings" => InvokePolicy {
+            timeout_ms: 15_000,
+            retries: 0,
+            retry_delay_ms: 0,
+        },
+        "add_codex_account"
+        | "reauthenticate_codex_account"
+        | "cancel_codex_account_login"
+        | "remove_codex_account"
+        | "set_system_codex_account"
+        | "send_codex_test_notification"
+        | "install_app_update" => InvokePolicy {
+            timeout_ms: 0,
+            retries: 0,
+            retry_delay_ms: 0,
+        },
+        _ => InvokePolicy {
+            timeout_ms: 30_000,
+            retries: 0,
+            retry_delay_ms: 0,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_commands_use_bounded_retry_policy() {
+        let policy = policy_for_command("get_codex_settings");
+        assert_eq!(policy.timeout_ms, 10_000);
+        assert_eq!(policy.retries, 2);
+    }
+
+    #[test]
+    fn mutating_commands_do_not_retry() {
+        let policy = policy_for_command("set_codex_notifications_enabled");
+        assert_eq!(policy.timeout_ms, 15_000);
+        assert_eq!(policy.retries, 0);
+    }
+
+    #[test]
+    fn login_commands_are_not_timed_out_by_frontend() {
+        let policy = policy_for_command("add_codex_account");
+        assert_eq!(policy.timeout_ms, 0);
+        assert_eq!(policy.retries, 0);
+    }
 }

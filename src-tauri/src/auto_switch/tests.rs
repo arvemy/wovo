@@ -62,7 +62,7 @@ fn usage_map(usages: Vec<UsageSnapshot>) -> HashMap<String, UsageSnapshot> {
         .map(|usage| (usage.account_id.clone(), usage))
         .collect()
 }
-fn no_usage_errors() -> HashMap<String, String> {
+fn no_usage_errors() -> HashMap<String, AccountIssue> {
     HashMap::new()
 }
 #[test]
@@ -213,7 +213,10 @@ fn auto_switch_candidate_ignores_accounts_with_refresh_errors() {
         usage_for_account("healthy", 50.0, 50.0, 0.0, 100.0),
     ]);
     let mut target_errors = HashMap::new();
-    target_errors.insert("stale".to_string(), "refresh failed".to_string());
+    target_errors.insert(
+        "stale".to_string(),
+        AccountIssue::new("refresh_failed", "Refresh failed.", false),
+    );
 
     let candidate = auto_switch_candidate(
         &accounts,
@@ -226,7 +229,10 @@ fn auto_switch_candidate_ignores_accounts_with_refresh_errors() {
     assert_eq!(candidate.target_account_id, "healthy");
 
     let mut current_errors = HashMap::new();
-    current_errors.insert("current".to_string(), "refresh failed".to_string());
+    current_errors.insert(
+        "current".to_string(),
+        AccountIssue::new("refresh_failed", "Refresh failed.", false),
+    );
 
     assert!(auto_switch_candidate(
         &accounts,

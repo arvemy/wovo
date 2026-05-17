@@ -4,6 +4,7 @@ use crate::snapshot::{start_codex_snapshot_tasks, CodexSnapshotCoordinator};
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(desktop)]
 const WOVO_LIGHT_WINDOW_ICON: &[u8] = include_bytes!("../icons/wovo-window-light.png");
@@ -12,8 +13,10 @@ const WOVO_DARK_WINDOW_ICON: &[u8] = include_bytes!("../icons/wovo-window-dark.p
 
 pub(crate) fn run() {
     let snapshot_coordinator = Arc::new(CodexSnapshotCoordinator::default());
+    let snapshot_task_token = CancellationToken::new();
+    let setup_snapshot_task_token = snapshot_task_token.clone();
     let launched_minimized = std::env::args().any(|a| a == "--minimized");
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(
             handle_single_instance_launch,
         ))
@@ -35,7 +38,11 @@ pub(crate) fn run() {
                     let _ = window.hide();
                 }
             }
-            start_codex_snapshot_tasks(app.handle().clone(), snapshot_coordinator.clone());
+            start_codex_snapshot_tasks(
+                app.handle().clone(),
+                snapshot_coordinator.clone(),
+                setup_snapshot_task_token.clone(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -59,11 +66,32 @@ pub(crate) fn run() {
             crate::settings_commands::set_codex_usage_source_mode,
             crate::settings_commands::set_codex_launch_on_login,
             crate::settings_commands::send_codex_test_notification,
+            crate::settings_commands::open_notification_settings,
             crate::usage_commands::refresh_codex_usage,
             crate::usage_commands::refresh_all_usage
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        ]);
+
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(error) => {
+            report_runtime_error("Wovo could not start.", &error);
+            std::process::exit(1);
+        }
+    };
+
+    let shutdown_token = snapshot_task_token.clone();
+    app.run(move |_app, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            shutdown_token.cancel();
+        }
+    });
+}
+
+fn report_runtime_error(message: &str, error: &tauri::Error) {
+    eprintln!("{message} {error}");
 }
 
 fn handle_single_instance_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {

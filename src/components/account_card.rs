@@ -197,6 +197,7 @@ where
                                 class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("")
                                 type="button"
                                 aria-label="Set as system account"
+                                aria-disabled=move || disabled_for_set_system.with_value(|f| f()).to_string()
                                 disabled=move || disabled_for_set_system.with_value(|f| f())
                                 on:click=move |_| on_set_system.with_value(|f| f())
                             >
@@ -215,6 +216,7 @@ where
                                     class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Sm }.with_class("")
                                     type="button"
                                     aria-label="Re-authenticate account"
+                                    aria-disabled=move || disabled_for_reauth.with_value(|f| f()).to_string()
                                     disabled=move || disabled_for_reauth.with_value(|f| f())
                                     on:click=trigger
                                 >
@@ -232,6 +234,7 @@ where
                                 class=ButtonClass { variant: ButtonVariant::Ghost, size: ButtonSize::Icon }.with_class("text-muted-foreground hover:text-destructive-foreground hover:bg-destructive")
                                 type="button"
                                 aria-label="Remove account"
+                                aria-disabled=move || disabled_for_remove.with_value(|f| f()).to_string()
                                 disabled=move || disabled_for_remove.with_value(|f| f())
                                 on:click=move |_| on_remove.with_value(|f| f())
                             >

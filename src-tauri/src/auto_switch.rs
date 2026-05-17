@@ -1,6 +1,6 @@
 use crate::codex::settings::CodexSettings;
 use crate::domain::account::{AccountSourceKind, AccountSummary};
-use crate::domain::usage::{UsageSnapshot, UsageWindow};
+use crate::domain::usage::{AccountIssue, UsageSnapshot, UsageWindow};
 use std::collections::HashMap;
 
 const AUTO_SWITCH_THRESHOLD_PERCENT: f64 = 90.0;
@@ -99,7 +99,7 @@ fn compute_switch_score(
 pub(crate) fn auto_switch_candidate(
     accounts: &[AccountSummary],
     usage_by_account_id: &HashMap<String, UsageSnapshot>,
-    errors_by_account_id: &HashMap<String, String>,
+    errors_by_account_id: &HashMap<String, AccountIssue>,
     _settings: &CodexSettings,
 ) -> Option<AutoSwitchCandidate> {
     let current = accounts

@@ -6,20 +6,23 @@ use crate::codex::auth_store::system_codex_home_path;
 use crate::codex::settings;
 use crate::codex::snapshot_cache;
 use crate::codex::{cost_usage, quota_events};
-use crate::domain::usage::{CodexOverviewSnapshot, CostUsageSnapshot};
+use crate::domain::usage::{AccountIssue, CodexOverviewSnapshot, CostUsageSnapshot};
 use crate::error::AppError;
 use crate::notifications::send_codex_notifications;
 use crate::usage_commands::refresh_codex_usage_with_mode;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 const SNAPSHOT_EVENT: &str = "codex:snapshot-updated";
 const REMOTE_USAGE_REFRESH_SECONDS: u64 = 5 * 60;
 const COST_USAGE_REFRESH_SECONDS: u64 = 60 * 60;
+const COST_USAGE_SCAN_TIMEOUT_SECONDS: u64 = 30;
 
 #[tauri::command]
 pub(crate) async fn get_cached_codex_snapshot(
@@ -43,6 +46,7 @@ pub(crate) struct CodexSnapshotCoordinator {
     latest_generation: Mutex<u64>,
     refresh_lock: Mutex<()>,
     last_cost_refresh_at: Mutex<Option<i64>>,
+    cost_scan_running: Arc<AtomicBool>,
 }
 
 impl CodexSnapshotCoordinator {
@@ -115,7 +119,14 @@ impl CodexSnapshotCoordinator {
                     {
                         usage_by_account_id.insert(account.id.clone(), snapshot.clone());
                     }
-                    errors_by_account_id.insert(account.id.clone(), error.to_string());
+                    errors_by_account_id.insert(
+                        account.id.clone(),
+                        AccountIssue::new(
+                            error.code(),
+                            error.user_message().into_owned(),
+                            error.auth_related(),
+                        ),
+                    );
                 }
             }
         }
@@ -144,7 +155,11 @@ impl CodexSnapshotCoordinator {
                             Err(error) => {
                                 errors_by_account_id.insert(
                                     candidate.current_account_id,
-                                    format!("Auto switch failed: {error}"),
+                                    AccountIssue::new(
+                                        "auto_switch_failed",
+                                        "Auto switch failed.",
+                                        error.auth_related(),
+                                    ),
                                 );
                                 None
                             }
@@ -216,11 +231,25 @@ impl CodexSnapshotCoordinator {
         }
 
         let source_root = system_codex_home_path();
-        let result = tokio::task::spawn_blocking(move || {
-            cost_usage::load_cost_usage_snapshot(source_root, false)
-        })
+        let scan_running = self.cost_scan_running.clone();
+        if scan_running.swap(true, Ordering::AcqRel) {
+            return (
+                previous,
+                Some("Cost usage scan is still running.".to_string()),
+            );
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(COST_USAGE_SCAN_TIMEOUT_SECONDS),
+            tokio::task::spawn_blocking(move || {
+                let _guard = CostScanGuard(scan_running);
+                cost_usage::load_cost_usage_snapshot(source_root, false)
+            }),
+        )
         .await
-        .map_err(|error| AppError::AccountStore(error.to_string()))
+        .map_err(|_| AppError::AccountStore("cost usage scan timed out".to_string()))
+        .and_then(|join_result| {
+            join_result.map_err(|error| AppError::AccountStore(error.to_string()))
+        })
         .and_then(|result| result);
 
         match result {
@@ -239,17 +268,30 @@ impl CodexSnapshotCoordinator {
     }
 }
 
+struct CostScanGuard(Arc<AtomicBool>);
+
+impl Drop for CostScanGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 pub(crate) fn start_codex_snapshot_tasks(
     app: AppHandle,
     coordinator: Arc<CodexSnapshotCoordinator>,
+    cancellation_token: CancellationToken,
 ) {
     let initial_app = app.clone();
     let initial_coordinator = coordinator.clone();
+    let initial_token = cancellation_token.clone();
     tauri::async_runtime::spawn(async move {
         if let Some(snapshot) = snapshot_cache::load_snapshot() {
             initial_coordinator
                 .store_and_emit(&initial_app, snapshot)
                 .await;
+        }
+        if initial_token.is_cancelled() {
+            return;
         }
         initial_coordinator
             .refresh_scheduled(initial_app.clone(), true)
@@ -258,18 +300,26 @@ pub(crate) fn start_codex_snapshot_tasks(
 
     let remote_app = app.clone();
     let remote_coordinator = coordinator.clone();
+    let remote_token = cancellation_token.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(REMOTE_USAGE_REFRESH_SECONDS)).await;
+            tokio::select! {
+                _ = remote_token.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(REMOTE_USAGE_REFRESH_SECONDS)) => {}
+            }
             remote_coordinator
                 .refresh_scheduled(remote_app.clone(), false)
                 .await;
         }
     });
 
+    let cost_token = cancellation_token.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(COST_USAGE_REFRESH_SECONDS)).await;
+            tokio::select! {
+                _ = cost_token.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(COST_USAGE_REFRESH_SECONDS)) => {}
+            }
             coordinator.refresh_scheduled(app.clone(), true).await;
         }
     });

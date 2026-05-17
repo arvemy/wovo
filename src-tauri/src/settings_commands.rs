@@ -1,6 +1,6 @@
 use crate::codex::settings::{self, CodexSettings, CodexUsageSourceMode};
 use crate::error::AppError;
-use crate::notifications::NotificationStatus;
+use crate::notifications::{NotificationSettingsOpenResult, NotificationStatus};
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
@@ -55,6 +55,11 @@ pub(crate) async fn send_codex_test_notification(
     }
 
     Ok(crate::notifications::send_test_notification(&app).await)
+}
+
+#[tauri::command]
+pub(crate) fn open_notification_settings() -> NotificationSettingsOpenResult {
+    crate::notifications::open_notification_settings()
 }
 
 #[tauri::command]

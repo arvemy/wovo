@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 use crate::domain::account::AccountSummary;
@@ -90,14 +90,76 @@ pub struct CostUsageSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AccountIssue {
+    pub code: String,
+    pub user_message: String,
+    pub auth_related: bool,
+}
+
+impl AccountIssue {
+    pub fn new(
+        code: impl Into<String>,
+        user_message: impl Into<String>,
+        auth_related: bool,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            user_message: user_message.into(),
+            auth_related,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexOverviewSnapshot {
     pub accounts: Vec<AccountSummary>,
     pub usage_by_account_id: HashMap<String, UsageSnapshot>,
-    pub errors_by_account_id: HashMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_account_issues")]
+    pub errors_by_account_id: HashMap<String, AccountIssue>,
     #[serde(default)]
     pub quota_events: Vec<QuotaEvent>,
     pub cost_usage: Option<CostUsageSnapshot>,
     pub cost_error: Option<String>,
     pub generated_at: i64,
     pub stale: bool,
+}
+
+fn deserialize_account_issues<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, AccountIssue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredIssue {
+        Structured(AccountIssue),
+        Legacy(String),
+    }
+
+    let issues = HashMap::<String, StoredIssue>::deserialize(deserializer)?;
+    Ok(issues
+        .into_iter()
+        .map(|(account_id, issue)| {
+            let issue = match issue {
+                StoredIssue::Structured(issue) => issue,
+                StoredIssue::Legacy(message) => {
+                    let auth_related = legacy_message_is_auth_related(&message);
+                    AccountIssue::new("legacy_error", message, auth_related)
+                }
+            };
+            (account_id, issue)
+        })
+        .collect())
+}
+
+fn legacy_message_is_auth_related(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("401")
+        || message.contains("403")
+        || message.contains("unauthorized")
+        || message.contains("invalid_grant")
+        || message.contains("auth.json was not found")
+        || message.contains("does not contain oauth tokens")
 }

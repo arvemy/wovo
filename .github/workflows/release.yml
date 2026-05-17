@@ -142,6 +142,17 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Generate release notes
+        id: release_notes
+        shell: bash
+        run: |
+          node scripts/generate-release-notes.mjs > RELEASE_NOTES.md
+          {
+            echo 'body<<EOF'
+            cat RELEASE_NOTES.md
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -152,7 +163,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: WoVo v__VERSION__
-          releaseBody: See the assets to download and install this version.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true

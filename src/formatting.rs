@@ -28,16 +28,6 @@ pub(crate) fn format_usage_days(days: f64) -> String {
     }
 }
 
-pub(crate) fn is_auth_failure_message(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("401")
-        || message.contains("403")
-        || message.contains("unauthorized")
-        || message.contains("invalid_grant")
-        || message.contains("auth.json was not found")
-        || message.contains("does not contain oauth tokens")
-}
-
 pub(crate) fn quota_event_kind_label(kind: &QuotaEventKind) -> &'static str {
     match kind {
         QuotaEventKind::Warning => "Warning",
@@ -90,11 +80,11 @@ pub(crate) fn quota_event_meta_suffix(event: &QuotaEvent) -> String {
 
 pub(crate) fn usage_meter_fill_class(used_percent: f64) -> &'static str {
     if used_percent >= 100.0 {
-        "h-full min-w-0.5 rounded-full bg-[var(--critical)] transition-colors duration-300 ease-in-out"
+        "usage-meter-fill usage-meter-fill-critical"
     } else if used_percent >= 80.0 {
-        "h-full min-w-0.5 rounded-full bg-[var(--warning)] transition-colors duration-300 ease-in-out"
+        "usage-meter-fill usage-meter-fill-warning"
     } else {
-        "h-full min-w-0.5 rounded-full bg-[var(--success)] transition-colors duration-300 ease-in-out"
+        "usage-meter-fill usage-meter-fill-success"
     }
 }
 

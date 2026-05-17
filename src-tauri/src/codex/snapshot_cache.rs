@@ -88,7 +88,9 @@ fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::usage::{CostUsageSnapshot, QuotaEvent, QuotaEventKind, QuotaEventSeverity};
+    use crate::domain::usage::{
+        AccountIssue, CostUsageSnapshot, QuotaEvent, QuotaEventKind, QuotaEventSeverity,
+    };
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -100,7 +102,10 @@ mod tests {
 
     fn snapshot() -> CodexOverviewSnapshot {
         let mut errors = HashMap::new();
-        errors.insert("account-1".to_string(), "temporary error".to_string());
+        errors.insert(
+            "account-1".to_string(),
+            AccountIssue::new("temporary_error", "Temporary error.", false),
+        );
         CodexOverviewSnapshot {
             accounts: Vec::new(),
             usage_by_account_id: HashMap::new(),
