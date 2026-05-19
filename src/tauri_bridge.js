@@ -1,13 +1,8 @@
-function tauriInternals() {
-  const internals = window.__TAURI_INTERNALS__;
-  if (!internals) {
-    throw new Error("Tauri internals are unavailable.");
-  }
-  return internals;
-}
+import { invoke as tauriInvoke } from "/tauri-api/core.js";
+import { listen as tauriListen } from "/tauri-api/event.js";
 
 export function invoke(command, args) {
-  return tauriInternals().invoke(command, args);
+  return tauriInvoke(command, args);
 }
 
 export async function invokeWithPolicy(command, args, timeoutMs, retries, retryDelayMs) {
@@ -52,11 +47,5 @@ function delay(ms) {
 }
 
 export async function listen(event, handler) {
-  const internals = tauriInternals();
-  const eventId = await internals.invoke("plugin:event|listen", {
-    event,
-    target: { kind: "Any" },
-    handler: internals.transformCallback(handler),
-  });
-  return eventId;
+  return await tauriListen(event, handler);
 }

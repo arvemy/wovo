@@ -3,10 +3,12 @@ use crate::error::AppError;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 const REFRESH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const TOKEN_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Serialize)]
 struct RefreshRequest<'a> {
@@ -30,7 +32,10 @@ pub async fn refresh(
         return Ok(credentials);
     }
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(TOKEN_REFRESH_TIMEOUT)
+        .build()
+        .map_err(|error| AppError::TokenRefresh(error.to_string()))?;
     let response = client
         .post(REFRESH_ENDPOINT)
         .json(&RefreshRequest {

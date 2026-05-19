@@ -67,6 +67,109 @@ fn refuses_to_remove_home_outside_managed_root() {
 }
 
 #[test]
+fn remove_account_keeps_record_when_home_path_is_unsafe() {
+    let root = temp_root("unsafe-account-remove");
+    let store = ManagedCodexAccountStore::new(root.clone());
+    let outside = temp_root("unsafe-account-home");
+    let id = Uuid::new_v4();
+    let payload = ManagedCodexAccountSet {
+        version: STORE_VERSION,
+        accounts: vec![ManagedCodexAccountRecord {
+            id,
+            email: Some("user@example.com".to_string()),
+            provider_account_id: Some("account-1".to_string()),
+            workspace_account_id: None,
+            workspace_label: None,
+            home_path: outside.to_string_lossy().to_string(),
+            created_at: 1,
+            updated_at: 2,
+            last_authenticated_at: Some(3),
+        }],
+    };
+    fs::write(
+        root.join(STORE_FILE_NAME),
+        serde_json::to_string_pretty(&payload).unwrap(),
+    )
+    .unwrap();
+
+    let error = store.remove_account(&id.to_string()).unwrap_err();
+
+    assert!(matches!(error, AppError::UnsafeManagedHome(_)));
+    assert_eq!(store.load_accounts().unwrap().len(), 1);
+    assert!(outside.exists());
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[test]
+fn remove_account_removes_record_and_home() {
+    let root = temp_root("remove-account");
+    let store = ManagedCodexAccountStore::new(root.clone());
+    let id = Uuid::new_v4();
+    let home = store.create_home(id).unwrap();
+    store
+        .upsert_authenticated_account(
+            id,
+            Some("user@example.com".to_string()),
+            Some("account-1".to_string()),
+            home.clone(),
+        )
+        .unwrap();
+
+    store.remove_account(&id.to_string()).unwrap();
+
+    assert!(store.load_accounts().unwrap().is_empty());
+    assert!(!home.exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(unix)]
+fn remove_account_restores_record_when_home_cleanup_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_root("remove-account-cleanup-fails");
+    let store = ManagedCodexAccountStore::new(root.clone());
+    let id = Uuid::new_v4();
+    let home = store.create_home(id).unwrap();
+    let locked_dir = home.join("locked");
+    fs::create_dir_all(&locked_dir).unwrap();
+    fs::write(locked_dir.join("auth-fragment.json"), "{}").unwrap();
+    fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    store
+        .upsert_authenticated_account(
+            id,
+            Some("user@example.com".to_string()),
+            Some("account-1".to_string()),
+            home.clone(),
+        )
+        .unwrap();
+
+    let error = store.remove_account(&id.to_string()).unwrap_err();
+
+    assert!(matches!(error, AppError::AccountStore(_)));
+    let accounts = store.load_accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, id);
+    assert_eq!(accounts[0].home_path, home.to_string_lossy().to_string());
+    assert!(home.join("locked").join("auth-fragment.json").exists());
+    assert!(!fs::read_dir(store.managed_homes_dir())
+        .unwrap()
+        .any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".removing.")
+        }));
+
+    fs::set_permissions(home.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn explicit_reauth_id_replaces_existing_home_after_success() {
     let root = temp_root("reauth-replace");
     let store = ManagedCodexAccountStore::new(root.clone());

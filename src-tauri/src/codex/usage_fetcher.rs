@@ -13,6 +13,7 @@ use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 
 const USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const OAUTH_USAGE_TIMEOUT: Duration = Duration::from_secs(15);
 const APP_SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 const APP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_ERROR_OUTPUT_BYTES: usize = 4_000;
@@ -48,7 +49,10 @@ pub async fn fetch_oauth_usage(
     account_id: String,
     credentials: &CodexOAuthCredentials,
 ) -> Result<UsageSnapshot, AppError> {
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(OAUTH_USAGE_TIMEOUT)
+        .build()
+        .map_err(|error| AppError::UsageFetch(error.to_string()))?;
     let mut request = client
         .get(USAGE_ENDPOINT)
         .bearer_auth(&credentials.access_token)

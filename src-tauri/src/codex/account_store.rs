@@ -1,11 +1,13 @@
+use crate::codex::atomic_file::{replace_file, temporary_file_path, write_new_file};
 use crate::domain::account::AccountSummary;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -64,6 +66,7 @@ const KNOWN_SHARED_CODEX_FILES: &[&str] = &[
     "version.json",
 ];
 const BACKUPS_DIR_NAME: &str = "backups";
+static ACCOUNT_STORE_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,7 +209,12 @@ impl ManagedCodexAccountStore {
     }
 
     pub fn load_accounts(&self) -> Result<Vec<ManagedCodexAccountRecord>, AppError> {
-        self.migrate_legacy_store_if_needed()?;
+        let _guard = account_store_mutation_lock()?;
+        self.load_accounts_unlocked()
+    }
+
+    fn load_accounts_unlocked(&self) -> Result<Vec<ManagedCodexAccountRecord>, AppError> {
+        self.migrate_legacy_store_if_needed_unlocked()?;
         let path = self.store_path();
         if !path.exists() {
             return Ok(Vec::new());
@@ -292,6 +300,26 @@ impl ManagedCodexAccountStore {
         workspace_label: Option<String>,
         home_path: PathBuf,
     ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError> {
+        let _guard = account_store_mutation_lock()?;
+        self.upsert_authenticated_account_with_workspace_unlocked(
+            preferred_id,
+            email,
+            provider_account_id,
+            workspace_account_id,
+            workspace_label,
+            home_path,
+        )
+    }
+
+    fn upsert_authenticated_account_with_workspace_unlocked(
+        &self,
+        preferred_id: Uuid,
+        email: Option<String>,
+        provider_account_id: Option<String>,
+        workspace_account_id: Option<String>,
+        workspace_label: Option<String>,
+        home_path: PathBuf,
+    ) -> Result<(ManagedCodexAccountRecord, Vec<PathBuf>), AppError> {
         let normalized_email = normalize_optional_email(email);
         let normalized_provider_account_id = normalize_optional(provider_account_id);
         let normalized_workspace_account_id = normalize_optional(workspace_account_id);
@@ -306,7 +334,7 @@ impl ManagedCodexAccountStore {
         }
 
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        let mut accounts = self.load_accounts()?;
+        let mut accounts = self.load_accounts_unlocked()?;
         let matched_index = if let Some(index) = accounts
             .iter()
             .position(|account| account.id == preferred_id)
@@ -378,7 +406,7 @@ impl ManagedCodexAccountStore {
                 .then_with(|| left.provider_account_id.cmp(&right.provider_account_id))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        self.store_accounts(accounts)?;
+        self.store_accounts_unlocked(accounts)?;
 
         Ok((record, replaced_home_paths))
     }
@@ -400,19 +428,21 @@ impl ManagedCodexAccountStore {
     where
         F: FnOnce(&ManagedCodexAccountRecord) -> Result<(), AppError>,
     {
-        let previous_accounts = self.load_accounts()?;
-        let (record, replaced_home_paths) = self.upsert_authenticated_account_with_workspace(
-            preferred_id,
-            email,
-            provider_account_id,
-            workspace_account_id,
-            workspace_label,
-            home_path,
-        )?;
+        let _guard = account_store_mutation_lock()?;
+        let previous_accounts = self.load_accounts_unlocked()?;
+        let (record, replaced_home_paths) = self
+            .upsert_authenticated_account_with_workspace_unlocked(
+                preferred_id,
+                email,
+                provider_account_id,
+                workspace_account_id,
+                workspace_label,
+                home_path,
+            )?;
 
         if let Err(error) = after_upsert(&record) {
             let error_message = error.to_string();
-            self.store_accounts(previous_accounts)
+            self.store_accounts_unlocked(previous_accounts)
                 .map_err(|rollback_error| {
                     AppError::AccountStore(format!(
                         "account update failed ({error_message}); rollback failed ({rollback_error})"
@@ -436,7 +466,8 @@ impl ManagedCodexAccountStore {
             return Ok(());
         }
 
-        let mut accounts = self.load_accounts()?;
+        let _guard = account_store_mutation_lock()?;
+        let mut accounts = self.load_accounts_unlocked()?;
         if let Some(workspace_account_id) = normalized_workspace_account_id.as_deref() {
             let duplicate = accounts.iter().any(|account| {
                 account.id != account_id
@@ -454,7 +485,7 @@ impl ManagedCodexAccountStore {
         account.workspace_account_id = normalized_workspace_account_id;
         account.workspace_label = normalized_workspace_label;
         account.updated_at = OffsetDateTime::now_utc().unix_timestamp();
-        self.store_accounts(accounts)
+        self.store_accounts_unlocked(accounts)
     }
 
     pub fn import_auth_from_home(
@@ -476,13 +507,48 @@ impl ManagedCodexAccountStore {
         let id = Uuid::parse_str(account_id)
             .map_err(|_| AppError::UnknownAccount(account_id.to_string()))?;
 
-        let mut accounts = self.load_accounts()?;
+        let _guard = account_store_mutation_lock()?;
+        let mut accounts = self.load_accounts_unlocked()?;
         let Some(index) = accounts.iter().position(|account| account.id == id) else {
             return Err(AppError::UnknownAccount(account_id.to_string()));
         };
-        let account = accounts.remove(index);
-        self.store_accounts(accounts)?;
-        self.remove_home_if_safe(Path::new(&account.home_path))?;
+        let home = PathBuf::from(&accounts[index].home_path);
+        self.validate_managed_home(&home)?;
+
+        let staged_home = if home.exists() {
+            let staged_home = self.removing_home_path(id);
+            move_path(&home, &staged_home)?;
+            Some(staged_home)
+        } else {
+            None
+        };
+
+        let previous_accounts = accounts.clone();
+        accounts.remove(index);
+        if let Err(error) = self.store_accounts_unlocked(accounts) {
+            if let Some(staged_home) = staged_home.as_ref() {
+                if let Err(restore_error) = move_path(staged_home, &home) {
+                    return Err(AppError::AccountStore(format!(
+                        "account removal failed ({error}); home restore failed ({restore_error})"
+                    )));
+                }
+            }
+            return Err(error);
+        }
+
+        if let Some(staged_home) = staged_home {
+            if staged_home.exists() {
+                if let Err(error) = fs::remove_dir_all(&staged_home) {
+                    return Err(self.rollback_removed_account_after_cleanup_failure(
+                        previous_accounts,
+                        id,
+                        &staged_home,
+                        &home,
+                        error,
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -503,18 +569,34 @@ impl ManagedCodexAccountStore {
         Ok(())
     }
 
-    fn store_accounts(&self, accounts: Vec<ManagedCodexAccountRecord>) -> Result<(), AppError> {
+    fn store_accounts_unlocked(
+        &self,
+        accounts: Vec<ManagedCodexAccountRecord>,
+    ) -> Result<(), AppError> {
         fs::create_dir_all(&self.root)
             .map_err(|error| AppError::AccountStore(error.to_string()))?;
         let payload = ManagedCodexAccountSet {
             version: STORE_VERSION,
             accounts: sanitized_accounts(accounts),
         };
-        let contents = serde_json::to_string_pretty(&payload)
+        let contents = serde_json::to_vec_pretty(&payload)
             .map_err(|error| AppError::AccountStore(error.to_string()))?;
-        fs::write(self.store_path(), contents)
+        let store_path = self.store_path();
+        let parent = store_path.parent().ok_or_else(|| {
+            AppError::AccountStore(format!(
+                "account store path has no parent: {}",
+                store_path.to_string_lossy()
+            ))
+        })?;
+        let tmp = temporary_file_path(parent, STORE_FILE_NAME);
+        write_new_file(&tmp, &contents)
             .map_err(|error| AppError::AccountStore(error.to_string()))?;
-        apply_secure_file_permissions(&self.store_path())?;
+        if let Err(error) = apply_secure_file_permissions(&tmp) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+        replace_file(&tmp, &store_path)
+            .map_err(|error| AppError::AccountStore(error.to_string()))?;
         Ok(())
     }
 
@@ -530,6 +612,46 @@ impl ManagedCodexAccountStore {
         self.legacy_root
             .as_ref()
             .map(|root| root.join(STORE_FILE_NAME))
+    }
+
+    fn removing_home_path(&self, id: Uuid) -> PathBuf {
+        self.managed_homes_dir()
+            .join(format!(".{id}.removing.{}", Uuid::new_v4()))
+    }
+
+    fn rollback_removed_account_after_cleanup_failure(
+        &self,
+        mut previous_accounts: Vec<ManagedCodexAccountRecord>,
+        account_id: Uuid,
+        staged_home: &Path,
+        home: &Path,
+        cleanup_error: IoError,
+    ) -> AppError {
+        let cleanup_message = cleanup_error.to_string();
+        let mut rollback_failures = Vec::new();
+        if let Err(error) = move_path(staged_home, home) {
+            rollback_failures.push(format!("home restore failed ({error})"));
+            if let Some(account) = previous_accounts
+                .iter_mut()
+                .find(|account| account.id == account_id)
+            {
+                account.home_path = staged_home.to_string_lossy().to_string();
+            }
+        }
+        if let Err(error) = self.store_accounts_unlocked(previous_accounts) {
+            rollback_failures.push(format!("record restore failed ({error})"));
+        }
+
+        if rollback_failures.is_empty() {
+            AppError::AccountStore(format!(
+                "managed Codex home cleanup failed; account record was restored ({cleanup_message})"
+            ))
+        } else {
+            AppError::AccountStore(format!(
+                "managed Codex home cleanup failed ({cleanup_message}); {}",
+                rollback_failures.join("; ")
+            ))
+        }
     }
 
     fn validate_managed_home(&self, home: &Path) -> Result<(), AppError> {
@@ -567,7 +689,7 @@ impl ManagedCodexAccountStore {
         Ok(())
     }
 
-    fn migrate_legacy_store_if_needed(&self) -> Result<(), AppError> {
+    fn migrate_legacy_store_if_needed_unlocked(&self) -> Result<(), AppError> {
         if self.store_path().exists() {
             return Ok(());
         }
@@ -606,7 +728,7 @@ impl ManagedCodexAccountStore {
             migrated.push(account);
         }
 
-        self.store_accounts(migrated)?;
+        self.store_accounts_unlocked(migrated)?;
         Ok(())
     }
 
@@ -727,6 +849,12 @@ fn dirs_home() -> PathBuf {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."))
         })
+}
+
+fn account_store_mutation_lock() -> Result<MutexGuard<'static, ()>, AppError> {
+    ACCOUNT_STORE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| AppError::AccountStore("account store lock was poisoned".to_string()))
 }
 
 #[cfg(test)]
