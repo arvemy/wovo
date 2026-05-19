@@ -11,13 +11,13 @@ use crate::codex_api::{
     NotificationStatus, QuotaEvent, UsageSnapshot,
 };
 use crate::components::nav::AppNav;
-use crate::components::settings_panel::SettingsPanel;
+use crate::components::settings_panel::{SettingsPanel, SettingsPanelActions, SettingsPanelState};
 use crate::components::update_banner::UpdateBanner;
 use crate::request_epoch::RequestEpoch;
 use crate::resize_guard::install_resize_transition_guard;
 use crate::theme::{current_theme_preference, set_theme_preference, ThemeMode};
 use crate::ui::alert::{Alert, AlertDescription};
-use crate::views::codex_page::CodexPage;
+use crate::views::codex_page::{CodexPage, CodexPageActions, CodexPageData};
 use crate::views::coming_soon::ComingSoonPage;
 use icons::X;
 use leptos::prelude::*;
@@ -325,55 +325,63 @@ pub fn App() -> impl IntoView {
                 {move || match active_provider.get() {
                     ProviderPage::Codex => view! {
                         <CodexPage
-                            visible_quota_events=visible_quota_events
-                            any_loading=any_loading
-                            latest_updated_at=latest_updated_at
-                            any_action_in_flight=move || is_account_action_loading.get()
-                            on_dismiss_quota_event=Box::new(move |event_id: String| {
-                                set_dismissed_quota_event_ids.update(|set| { set.insert(event_id); });
-                            })
-                            on_reveal_credential=Box::new(move |value: String| {
-                                set_revealed_credential.update(|current| {
-                                    let already_revealed = current.as_deref() == Some(value.as_str());
-                                    if already_revealed {
-                                        *current = None;
-                                    } else {
-                                        *current = Some(value);
-                                    }
-                                });
-                            })
-                            on_set_system=Box::new(move |account_id| account_actions.set_system(account_id))
-                            on_remove_account=Box::new(move |account_id| account_actions.remove(account_id))
-                            on_reauth=Box::new(move |account_id| account_actions.reauthenticate(account_id))
+                            data={CodexPageData {
+                                visible_quota_events,
+                                any_loading,
+                                latest_updated_at,
+                                account_action_in_flight: is_account_action_loading,
+                            }}
+                            actions={CodexPageActions {
+                                on_dismiss_quota_event: Box::new(move |event_id: String| {
+                                    set_dismissed_quota_event_ids.update(|set| { set.insert(event_id); });
+                                }),
+                                on_reveal_credential: Box::new(move |value: String| {
+                                    set_revealed_credential.update(|current| {
+                                        let already_revealed = current.as_deref() == Some(value.as_str());
+                                        if already_revealed {
+                                            *current = None;
+                                        } else {
+                                            *current = Some(value);
+                                        }
+                                    });
+                                }),
+                                on_set_system: Box::new(move |account_id| account_actions.set_system(account_id)),
+                                on_remove_account: Box::new(move |account_id| account_actions.remove(account_id)),
+                                on_reauth: Box::new(move |account_id| account_actions.reauthenticate(account_id)),
+                            }}
                         />
                     }.into_any(),
                     ProviderPage::Anthropic => view! { <ComingSoonPage/> }.into_any(),
                 }}
             </div>
             <SettingsPanel
-                is_open=is_settings_open
-                on_close=Box::new(move || set_is_settings_open.set(false))
-                theme_mode=theme_mode
-                on_change_theme=Box::new(change_theme_mode)
-                usage_source_mode=usage_source_mode
-                on_change_usage_source=Box::new(move |mode| settings_actions.change_usage_source_mode(mode))
-                cost_usage_enabled=cost_usage_enabled
-                on_change_cost_usage=Box::new(move |enabled| settings_actions.change_cost_usage_enabled(enabled))
-                notifications_enabled=notifications_enabled
-                on_change_notifications=Box::new(move |enabled| settings_actions.change_notifications_enabled(enabled))
-                notification_status=notification_status
-                is_notification_test_sending=is_notification_test_sending
-                on_send_test_notification=Box::new(move || notification_actions.send_test())
-                on_refresh_notification_status=Box::new(move || notification_actions.refresh_status())
-                hide_account_credentials=hide_account_credentials
-                on_change_hide_credentials=Box::new(move |enabled| settings_actions.change_hide_account_credentials(enabled))
-                launch_on_login=launch_on_login
-                on_change_launch_on_login=Box::new(move |enabled| settings_actions.change_launch_on_login(enabled))
-                auto_account_switching_enabled=auto_account_switching_enabled
-                on_change_auto_switching=Box::new(move |enabled| settings_actions.change_auto_account_switching_enabled(enabled))
-                auto_switch_runway=auto_switch_runway
-                is_settings_loading=is_settings_loading
-                is_listing=is_listing
+                state={SettingsPanelState {
+                    is_open: is_settings_open,
+                    theme_mode,
+                    usage_source_mode,
+                    cost_usage_enabled,
+                    notifications_enabled,
+                    notification_status,
+                    is_notification_test_sending,
+                    hide_account_credentials,
+                    launch_on_login,
+                    auto_account_switching_enabled,
+                    auto_switch_runway,
+                    is_settings_loading,
+                    is_listing,
+                }}
+                actions={SettingsPanelActions {
+                    on_close: Box::new(move || set_is_settings_open.set(false)),
+                    on_change_theme: Box::new(change_theme_mode),
+                    on_change_usage_source: Box::new(move |mode| settings_actions.change_usage_source_mode(mode)),
+                    on_change_cost_usage: Box::new(move |enabled| settings_actions.change_cost_usage_enabled(enabled)),
+                    on_change_notifications: Box::new(move |enabled| settings_actions.change_notifications_enabled(enabled)),
+                    on_send_test_notification: Box::new(move || notification_actions.send_test()),
+                    on_refresh_notification_status: Box::new(move || notification_actions.refresh_status()),
+                    on_change_hide_credentials: Box::new(move |enabled| settings_actions.change_hide_account_credentials(enabled)),
+                    on_change_launch_on_login: Box::new(move |enabled| settings_actions.change_launch_on_login(enabled)),
+                    on_change_auto_switching: Box::new(move |enabled| settings_actions.change_auto_account_switching_enabled(enabled)),
+                }}
             />
         </div>
     }

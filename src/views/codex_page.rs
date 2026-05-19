@@ -9,31 +9,29 @@ use crate::ui::skeleton::Skeleton;
 use icons::LoaderCircle;
 use leptos::prelude::*;
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "page boundary receives app state and callbacks as explicit reactive props"
-)]
+#[derive(Clone, Copy)]
+pub(crate) struct CodexPageData {
+    pub(crate) visible_quota_events: Memo<Vec<QuotaEvent>>,
+    pub(crate) any_loading: Memo<bool>,
+    pub(crate) latest_updated_at: Memo<Option<i64>>,
+    pub(crate) account_action_in_flight: ReadSignal<bool>,
+}
+
+pub(crate) struct CodexPageActions {
+    pub(crate) on_dismiss_quota_event: Box<dyn Fn(String) + Send + Sync>,
+    pub(crate) on_reveal_credential: Box<dyn Fn(String) + Send + Sync>,
+    pub(crate) on_set_system: Box<dyn Fn(String) + Send + Sync>,
+    pub(crate) on_remove_account: Box<dyn Fn(String) + Send + Sync>,
+    pub(crate) on_reauth: Box<dyn Fn(String) + Send + Sync>,
+}
+
 #[component]
-pub fn CodexPage<AAF>(
-    visible_quota_events: Memo<Vec<QuotaEvent>>,
-    any_loading: Memo<bool>,
-    latest_updated_at: Memo<Option<i64>>,
-    any_action_in_flight: AAF,
-    on_dismiss_quota_event: Box<dyn Fn(String) + Send + Sync>,
-    on_reveal_credential: Box<dyn Fn(String) + Send + Sync>,
-    on_set_system: Box<dyn Fn(String) + Send + Sync>,
-    on_remove_account: Box<dyn Fn(String) + Send + Sync>,
-    on_reauth: Box<dyn Fn(String) + Send + Sync>,
-) -> impl IntoView
-where
-    AAF: Fn() -> bool + Send + Sync + 'static,
-{
-    let on_dismiss_quota_event = StoredValue::new(on_dismiss_quota_event);
-    let on_reveal_credential = StoredValue::new(on_reveal_credential);
-    let on_set_system = StoredValue::new(on_set_system);
-    let on_remove_account = StoredValue::new(on_remove_account);
-    let on_reauth = StoredValue::new(on_reauth);
-    let any_action_in_flight = StoredValue::new(any_action_in_flight);
+pub fn CodexPage(data: CodexPageData, actions: CodexPageActions) -> impl IntoView {
+    let visible_quota_events = data.visible_quota_events;
+    let any_loading = data.any_loading;
+    let latest_updated_at = data.latest_updated_at;
+    let account_action_in_flight = data.account_action_in_flight;
+    let actions = StoredValue::new(actions);
     let overview = expect_context::<CodexOverviewState>();
     let settings = expect_context::<SettingsState>();
     let ui = expect_context::<AppUiState>();
@@ -77,8 +75,12 @@ where
                                                 is_credential_revealed=move |value| {
                                                     revealed_credential.with(|current| current.as_deref() == Some(value))
                                                 }
-                                                on_reveal_credential=Box::new(move |value| on_reveal_credential.with_value(|f| f(value)))
-                                                on_dismiss=Box::new(move |_| on_dismiss_quota_event.with_value(|f| f(event_id.clone())))
+                                                on_reveal_credential=Box::new(move |value| {
+                                                    actions.with_value(|actions| (actions.on_reveal_credential)(value))
+                                                })
+                                                on_dismiss=Box::new(move |_| {
+                                                    actions.with_value(|actions| (actions.on_dismiss_quota_event)(event_id.clone()))
+                                                })
                                             />
                                         }
                                     }
@@ -183,15 +185,23 @@ where
                                                 })
                                                 is_loading=move || loading_ids.with(|set| set.contains(&id_loading))
                                                 reauth_required=move || reauth_ids.with(|set| set.contains(&id_reauth))
-                                                disabled=move || any_action_in_flight.with_value(|f| f())
+                                                disabled=move || account_action_in_flight.get()
                                                 hide_credentials=move || hide_account_credentials.get()
                                                 is_credential_revealed=move |value| {
                                                     revealed_credential.with(|current| current.as_deref() == Some(value))
                                                 }
-                                                on_reveal_credential=Box::new(move |value| on_reveal_credential.with_value(|f| f(value)))
-                                                on_set_system=Box::new(move || on_set_system.with_value(|f| f(id_set_system.clone())))
-                                                on_remove=Box::new(move || on_remove_account.with_value(|f| f(id_remove.clone())))
-                                                on_reauth=Box::new(move || on_reauth.with_value(|f| f(id_reauth_action.clone())))
+                                                on_reveal_credential=Box::new(move |value| {
+                                                    actions.with_value(|actions| (actions.on_reveal_credential)(value))
+                                                })
+                                                on_set_system=Box::new(move || {
+                                                    actions.with_value(|actions| (actions.on_set_system)(id_set_system.clone()))
+                                                })
+                                                on_remove=Box::new(move || {
+                                                    actions.with_value(|actions| (actions.on_remove_account)(id_remove.clone()))
+                                                })
+                                                on_reauth=Box::new(move || {
+                                                    actions.with_value(|actions| (actions.on_reauth)(id_reauth_action.clone()))
+                                                })
                                             />
                                         }
                                     }

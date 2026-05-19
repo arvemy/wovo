@@ -12,52 +12,52 @@ use leptos::task::spawn_local;
 use tw_merge::IntoTailwindClass;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Leptos component props are passed explicitly for reactive call sites"
-)]
+#[derive(Clone, Copy)]
+pub(crate) struct SettingsPanelState {
+    pub(crate) is_open: ReadSignal<bool>,
+    pub(crate) theme_mode: ReadSignal<ThemeMode>,
+    pub(crate) usage_source_mode: ReadSignal<CodexUsageSourceMode>,
+    pub(crate) cost_usage_enabled: ReadSignal<bool>,
+    pub(crate) notifications_enabled: ReadSignal<bool>,
+    pub(crate) notification_status: ReadSignal<Option<NotificationStatus>>,
+    pub(crate) is_notification_test_sending: ReadSignal<bool>,
+    pub(crate) hide_account_credentials: ReadSignal<bool>,
+    pub(crate) launch_on_login: ReadSignal<bool>,
+    pub(crate) auto_account_switching_enabled: ReadSignal<bool>,
+    pub(crate) auto_switch_runway: Memo<Option<AutoSwitchRunwayEstimate>>,
+    pub(crate) is_settings_loading: ReadSignal<bool>,
+    pub(crate) is_listing: ReadSignal<bool>,
+}
+
+pub(crate) struct SettingsPanelActions {
+    pub(crate) on_close: Box<dyn Fn() + Send + Sync>,
+    pub(crate) on_change_theme: Box<dyn Fn(ThemeMode) + Send + Sync>,
+    pub(crate) on_change_usage_source: Box<dyn Fn(CodexUsageSourceMode) + Send + Sync>,
+    pub(crate) on_change_cost_usage: Box<dyn Fn(bool) + Send + Sync>,
+    pub(crate) on_change_notifications: Box<dyn Fn(bool) + Send + Sync>,
+    pub(crate) on_send_test_notification: Box<dyn Fn() + Send + Sync>,
+    pub(crate) on_refresh_notification_status: Box<dyn Fn() + Send + Sync>,
+    pub(crate) on_change_hide_credentials: Box<dyn Fn(bool) + Send + Sync>,
+    pub(crate) on_change_launch_on_login: Box<dyn Fn(bool) + Send + Sync>,
+    pub(crate) on_change_auto_switching: Box<dyn Fn(bool) + Send + Sync>,
+}
+
 #[component]
-pub fn SettingsPanel(
-    #[prop(into)] is_open: Signal<bool>,
-    on_close: Box<dyn Fn() + Send + Sync>,
-    // Appearance
-    #[prop(into)] theme_mode: Signal<ThemeMode>,
-    on_change_theme: Box<dyn Fn(ThemeMode) + Send + Sync>,
-    // Data
-    #[prop(into)] usage_source_mode: Signal<CodexUsageSourceMode>,
-    on_change_usage_source: Box<dyn Fn(CodexUsageSourceMode) + Send + Sync>,
-    #[prop(into)] cost_usage_enabled: Signal<bool>,
-    on_change_cost_usage: Box<dyn Fn(bool) + Send + Sync>,
-    // Notifications
-    #[prop(into)] notifications_enabled: Signal<bool>,
-    on_change_notifications: Box<dyn Fn(bool) + Send + Sync>,
-    #[prop(into)] notification_status: Signal<Option<NotificationStatus>>,
-    #[prop(into)] is_notification_test_sending: Signal<bool>,
-    on_send_test_notification: Box<dyn Fn() + Send + Sync>,
-    on_refresh_notification_status: Box<dyn Fn() + Send + Sync>,
-    // Privacy
-    #[prop(into)] hide_account_credentials: Signal<bool>,
-    on_change_hide_credentials: Box<dyn Fn(bool) + Send + Sync>,
-    // System
-    #[prop(into)] launch_on_login: Signal<bool>,
-    on_change_launch_on_login: Box<dyn Fn(bool) + Send + Sync>,
-    // Auto switch
-    #[prop(into)] auto_account_switching_enabled: Signal<bool>,
-    on_change_auto_switching: Box<dyn Fn(bool) + Send + Sync>,
-    auto_switch_runway: Memo<Option<AutoSwitchRunwayEstimate>>,
-    #[prop(into)] is_settings_loading: Signal<bool>,
-    #[prop(into)] is_listing: Signal<bool>,
-) -> impl IntoView {
-    let on_close = StoredValue::new(on_close);
-    let on_change_theme = StoredValue::new(on_change_theme);
-    let on_change_usage_source = StoredValue::new(on_change_usage_source);
-    let on_change_cost_usage = StoredValue::new(on_change_cost_usage);
-    let on_change_notifications = StoredValue::new(on_change_notifications);
-    let on_send_test_notification = StoredValue::new(on_send_test_notification);
-    let on_refresh_notification_status = StoredValue::new(on_refresh_notification_status);
-    let on_change_hide_credentials = StoredValue::new(on_change_hide_credentials);
-    let on_change_launch_on_login = StoredValue::new(on_change_launch_on_login);
-    let on_change_auto_switching = StoredValue::new(on_change_auto_switching);
+pub fn SettingsPanel(state: SettingsPanelState, actions: SettingsPanelActions) -> impl IntoView {
+    let is_open = state.is_open;
+    let theme_mode = state.theme_mode;
+    let usage_source_mode = state.usage_source_mode;
+    let cost_usage_enabled = state.cost_usage_enabled;
+    let notifications_enabled = state.notifications_enabled;
+    let notification_status = state.notification_status;
+    let is_notification_test_sending = state.is_notification_test_sending;
+    let hide_account_credentials = state.hide_account_credentials;
+    let launch_on_login = state.launch_on_login;
+    let auto_account_switching_enabled = state.auto_account_switching_enabled;
+    let auto_switch_runway = state.auto_switch_runway;
+    let is_settings_loading = state.is_settings_loading;
+    let is_listing = state.is_listing;
+    let actions = StoredValue::new(actions);
     let (notification_settings_message, set_notification_settings_message) =
         signal::<Option<String>>(None);
     let (refresh_notification_status_on_focus, set_refresh_notification_status_on_focus) =
@@ -67,7 +67,7 @@ pub fn SettingsPanel(
         let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
             if refresh_notification_status_on_focus.get_untracked() {
                 set_refresh_notification_status_on_focus.set(false);
-                on_refresh_notification_status.with_value(|f| f());
+                actions.with_value(|actions| (actions.on_refresh_notification_status)());
             }
         });
 
@@ -93,7 +93,7 @@ pub fn SettingsPanel(
         {move || is_open.get().then(|| view! {
             <div
                 class="fixed inset-0 z-40 bg-background/60 backdrop-blur-[1px]"
-                on:click=move |_| on_close.with_value(|f| f())
+                on:click=move |_| actions.with_value(|actions| (actions.on_close)())
             />
         })}
 
@@ -114,7 +114,7 @@ pub fn SettingsPanel(
                     class=ButtonClass { variant: ButtonVariant::Ghost, size: ButtonSize::Icon }.with_class("size-8 text-muted-foreground")
                     type="button"
                     aria-label="Close settings"
-                    on:click=move |_| on_close.with_value(|f| f())
+                    on:click=move |_| actions.with_value(|actions| (actions.on_close)())
                 >
                     <X class="size-4"/>
                 </button>
@@ -139,7 +139,9 @@ pub fn SettingsPanel(
                                         }
                                         type="button"
                                         aria-pressed=move || selected().to_string()
-                                        on:click=move |_| on_change_theme.with_value(|f| f(mode))
+                                        on:click=move |_| {
+                                            actions.with_value(|actions| (actions.on_change_theme)(mode))
+                                        }
                                     >
                                         {match mode {
                                             ThemeMode::Light => view! { <Sun class="size-3"/> }.into_any(),
@@ -180,7 +182,9 @@ pub fn SettingsPanel(
                                             type="button"
                                             aria-pressed=move || selected().to_string()
                                             disabled=move || is_listing.get() || is_settings_loading.get()
-                                            on:click=move |_| on_change_usage_source.with_value(|f| f(mode))
+                                            on:click=move |_| {
+                                                actions.with_value(|actions| (actions.on_change_usage_source)(mode))
+                                            }
                                         >
                                             {mode.label()}
                                         </button>
@@ -195,7 +199,9 @@ pub fn SettingsPanel(
                         description="Track local token cost"
                         checked=cost_usage_enabled
                         disabled=Signal::derive(move || is_listing.get() || is_settings_loading.get())
-                        on_change=Callback::new(move |v| on_change_cost_usage.with_value(|f| f(v)))
+                        on_change=Callback::new(move |v| {
+                            actions.with_value(|actions| (actions.on_change_cost_usage)(v))
+                        })
                     />
                 </SettingsSection>
 
@@ -208,7 +214,9 @@ pub fn SettingsPanel(
                         description="Quota and auto-switch alerts"
                         checked=notifications_enabled
                         disabled=is_settings_loading
-                        on_change=Callback::new(move |v| on_change_notifications.with_value(|f| f(v)))
+                        on_change=Callback::new(move |v| {
+                            actions.with_value(|actions| (actions.on_change_notifications)(v))
+                        })
                     />
                     {move || notification_status.get().map(|status| {
                         let status_text = notification_status_text(&status);
@@ -229,7 +237,9 @@ pub fn SettingsPanel(
                                             aria-label="Send test notification"
                                             aria-busy=move || is_notification_test_sending.get().to_string()
                                             disabled=move || is_notification_test_sending.get()
-                                            on:click=move |_| on_send_test_notification.with_value(|f| f())
+                                            on:click=move |_| {
+                                                actions.with_value(|actions| (actions.on_send_test_notification)())
+                                            }
                                         >
                                             {move || if is_notification_test_sending.get() { "Sending..." } else { "Send test" }}
                                         </button>
@@ -262,7 +272,7 @@ pub fn SettingsPanel(
                                                     if refresh_on_focus {
                                                         set_refresh_notification_status_on_focus.set(true);
                                                     }
-                                                    on_refresh_notification_status.with_value(|f| f());
+                                                    actions.with_value(|actions| (actions.on_refresh_notification_status)());
                                                 });
                                             }
                                         >
@@ -290,7 +300,9 @@ pub fn SettingsPanel(
                         description="Mask account labels"
                         checked=hide_account_credentials
                         disabled=is_settings_loading
-                        on_change=Callback::new(move |v| on_change_hide_credentials.with_value(|f| f(v)))
+                        on_change=Callback::new(move |v| {
+                            actions.with_value(|actions| (actions.on_change_hide_credentials)(v))
+                        })
                     />
                 </SettingsSection>
 
@@ -303,7 +315,9 @@ pub fn SettingsPanel(
                         description="Start minimized to tray"
                         checked=launch_on_login
                         disabled=is_settings_loading
-                        on_change=Callback::new(move |v| on_change_launch_on_login.with_value(|f| f(v)))
+                        on_change=Callback::new(move |v| {
+                            actions.with_value(|actions| (actions.on_change_launch_on_login)(v))
+                        })
                     />
                 </SettingsSection>
 
@@ -316,7 +330,9 @@ pub fn SettingsPanel(
                         description="Switch accounts automatically at 90% quota"
                         checked=auto_account_switching_enabled
                         disabled=is_settings_loading
-                        on_change=Callback::new(move |v| on_change_auto_switching.with_value(|f| f(v)))
+                        on_change=Callback::new(move |v| {
+                            actions.with_value(|actions| (actions.on_change_auto_switching)(v))
+                        })
                     />
 
                     // Pool runway (always shown when available)

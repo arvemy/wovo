@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const SETTINGS_FILE_NAME: &str = "codex-settings.json";
+static SETTINGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,49 +66,65 @@ pub fn load_settings() -> Result<CodexSettings, AppError> {
 }
 
 pub fn save_usage_source_mode(mode: CodexUsageSourceMode) -> Result<CodexSettings, AppError> {
-    let mut settings = load_settings()?;
-    settings.usage_source_mode = mode;
-    save_settings_to_path(&settings_path(), &settings)?;
-    Ok(settings)
+    update_settings(|settings| {
+        settings.usage_source_mode = mode;
+    })
 }
 
 pub fn save_cost_usage_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
-    let mut settings = load_settings()?;
-    settings.cost_usage_enabled = enabled;
-    save_settings_to_path(&settings_path(), &settings)?;
-    Ok(settings)
+    update_settings(|settings| {
+        settings.cost_usage_enabled = enabled;
+    })
 }
 
 pub fn save_notifications_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
-    let mut settings = load_settings()?;
-    settings.notifications_enabled = enabled;
-    save_settings_to_path(&settings_path(), &settings)?;
-    Ok(settings)
+    update_settings(|settings| {
+        settings.notifications_enabled = enabled;
+    })
 }
 
 pub fn save_auto_account_switching_enabled(enabled: bool) -> Result<CodexSettings, AppError> {
-    let mut settings = load_settings()?;
-    settings.auto_account_switching_enabled = enabled;
-    save_settings_to_path(&settings_path(), &settings)?;
-    Ok(settings)
+    update_settings(|settings| {
+        settings.auto_account_switching_enabled = enabled;
+    })
 }
 
 pub fn save_hide_account_credentials(enabled: bool) -> Result<CodexSettings, AppError> {
-    let mut settings = load_settings()?;
-    settings.hide_account_credentials = enabled;
-    save_settings_to_path(&settings_path(), &settings)?;
-    Ok(settings)
+    update_settings(|settings| {
+        settings.hide_account_credentials = enabled;
+    })
 }
 
 pub fn save_launch_on_login(enabled: bool) -> Result<CodexSettings, AppError> {
-    let mut settings = load_settings()?;
-    settings.launch_on_login = enabled;
-    save_settings_to_path(&settings_path(), &settings)?;
-    Ok(settings)
+    update_settings(|settings| {
+        settings.launch_on_login = enabled;
+    })
 }
 
 fn settings_path() -> PathBuf {
     default_wovo_codex_root().join(SETTINGS_FILE_NAME)
+}
+
+fn update_settings(update: impl FnOnce(&mut CodexSettings)) -> Result<CodexSettings, AppError> {
+    update_settings_at_path(&settings_path(), &system_codex_home_path(), update)
+}
+
+fn update_settings_at_path(
+    path: &Path,
+    codex_home: &Path,
+    update: impl FnOnce(&mut CodexSettings),
+) -> Result<CodexSettings, AppError> {
+    let _guard = settings_write_lock()
+        .lock()
+        .map_err(|_| AppError::AccountStore("settings write lock was poisoned".to_string()))?;
+    let mut settings = load_settings_from_path_with_codex_home(path, codex_home)?;
+    update(&mut settings);
+    save_settings_to_path(path, &settings)?;
+    Ok(settings)
+}
+
+fn settings_write_lock() -> &'static Mutex<()> {
+    SETTINGS_WRITE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn load_settings_from_path_with_codex_home(
@@ -180,6 +198,11 @@ fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn temp_settings_path(name: &str) -> PathBuf {
@@ -246,6 +269,48 @@ mod tests {
         assert!(!loaded.cost_usage_enabled);
         assert!(!loaded.auto_account_switching_enabled);
         assert!(!loaded.hide_account_credentials);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn concurrent_settings_updates_preserve_independent_fields() {
+        let path = temp_settings_path("concurrent-settings");
+        let codex_home = path.parent().unwrap().join("codex-home");
+        save_settings_to_path(&path, &CodexSettings::default()).unwrap();
+
+        let first_update_started = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let marker = first_update_started.clone();
+            let first_path = path.clone();
+            let first_codex_home = codex_home.clone();
+            let first = scope.spawn(move || {
+                update_settings_at_path(&first_path, &first_codex_home, |settings| {
+                    marker.store(true, Ordering::Release);
+                    std::thread::sleep(Duration::from_millis(50));
+                    settings.notifications_enabled = false;
+                })
+                .unwrap();
+            });
+
+            while !first_update_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+
+            let second = scope.spawn(|| {
+                update_settings_at_path(&path, &codex_home, |settings| {
+                    settings.hide_account_credentials = true;
+                })
+                .unwrap();
+            });
+
+            first.join().unwrap();
+            second.join().unwrap();
+        });
+
+        let loaded =
+            load_settings_from_path_with_codex_home(&path, path.parent().unwrap()).unwrap();
+        assert!(!loaded.notifications_enabled);
+        assert!(loaded.hide_account_credentials);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

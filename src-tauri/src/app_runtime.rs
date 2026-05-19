@@ -1,7 +1,10 @@
 use crate::codex::login_runner::LoginRunnerState;
 use crate::codex::settings;
-use crate::snapshot::{start_codex_snapshot_tasks, CodexSnapshotCoordinator};
-use std::sync::Arc;
+use crate::snapshot::{
+    start_codex_snapshot_tasks, CodexSnapshotCoordinator, SnapshotTaskSupervisor,
+};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 use tokio_util::sync::CancellationToken;
@@ -15,6 +18,8 @@ pub(crate) fn run() {
     let snapshot_coordinator = Arc::new(CodexSnapshotCoordinator::default());
     let snapshot_task_token = CancellationToken::new();
     let setup_snapshot_task_token = snapshot_task_token.clone();
+    let snapshot_task_supervisor = Arc::new(Mutex::new(None::<SnapshotTaskSupervisor>));
+    let setup_snapshot_task_supervisor = snapshot_task_supervisor.clone();
     let launched_minimized = std::env::args().any(|a| a == "--minimized");
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(
@@ -38,11 +43,14 @@ pub(crate) fn run() {
                     let _ = window.hide();
                 }
             }
-            start_codex_snapshot_tasks(
+            let supervisor = start_codex_snapshot_tasks(
                 app.handle().clone(),
                 snapshot_coordinator.clone(),
                 setup_snapshot_task_token.clone(),
             );
+            if let Ok(mut slot) = setup_snapshot_task_supervisor.lock() {
+                *slot = Some(supervisor);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -79,13 +87,17 @@ pub(crate) fn run() {
         }
     };
 
-    let shutdown_token = snapshot_task_token.clone();
+    let shutdown_snapshot_task_supervisor = snapshot_task_supervisor.clone();
     app.run(move |_app, event| {
         if matches!(
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
-            shutdown_token.cancel();
+            if let Ok(mut supervisor) = shutdown_snapshot_task_supervisor.lock() {
+                if let Some(supervisor) = supervisor.take() {
+                    supervisor.shutdown(Duration::from_secs(2));
+                }
+            }
         }
     });
 }

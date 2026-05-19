@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -276,15 +277,32 @@ impl Drop for CostScanGuard {
     }
 }
 
+pub(crate) struct SnapshotTaskSupervisor {
+    cancellation_token: CancellationToken,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl SnapshotTaskSupervisor {
+    pub(crate) fn shutdown(self, timeout: Duration) {
+        self.cancellation_token.cancel();
+        let completed =
+            tauri::async_runtime::block_on(wait_for_snapshot_tasks(self.handles, timeout));
+        if !completed {
+            eprintln!("snapshot tasks did not stop before shutdown timeout");
+        }
+    }
+}
+
 pub(crate) fn start_codex_snapshot_tasks(
     app: AppHandle,
     coordinator: Arc<CodexSnapshotCoordinator>,
     cancellation_token: CancellationToken,
-) {
+) -> SnapshotTaskSupervisor {
+    let mut handles = Vec::new();
     let initial_app = app.clone();
     let initial_coordinator = coordinator.clone();
     let initial_token = cancellation_token.clone();
-    tauri::async_runtime::spawn(async move {
+    handles.push(tauri::async_runtime::spawn(async move {
         if let Some(snapshot) = snapshot_cache::load_snapshot() {
             initial_coordinator
                 .store_and_emit(&initial_app, snapshot)
@@ -296,12 +314,12 @@ pub(crate) fn start_codex_snapshot_tasks(
         initial_coordinator
             .refresh_scheduled(initial_app.clone(), true)
             .await;
-    });
+    }));
 
     let remote_app = app.clone();
     let remote_coordinator = coordinator.clone();
     let remote_token = cancellation_token.clone();
-    tauri::async_runtime::spawn(async move {
+    handles.push(tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
                 _ = remote_token.cancelled() => break,
@@ -311,10 +329,10 @@ pub(crate) fn start_codex_snapshot_tasks(
                 .refresh_scheduled(remote_app.clone(), false)
                 .await;
         }
-    });
+    }));
 
     let cost_token = cancellation_token.clone();
-    tauri::async_runtime::spawn(async move {
+    handles.push(tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
                 _ = cost_token.cancelled() => break,
@@ -322,5 +340,67 @@ pub(crate) fn start_codex_snapshot_tasks(
             }
             coordinator.refresh_scheduled(app.clone(), true).await;
         }
-    });
+    }));
+
+    SnapshotTaskSupervisor {
+        cancellation_token,
+        handles,
+    }
+}
+
+async fn wait_for_snapshot_tasks(mut handles: Vec<JoinHandle<()>>, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut completed = 0;
+
+    while completed < handles.len() {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+
+        let remaining = deadline - now;
+        match tokio::time::timeout(remaining, &mut handles[completed]).await {
+            Ok(_) => completed += 1,
+            Err(_) => break,
+        }
+    }
+
+    let all_completed = completed == handles.len();
+    if !all_completed {
+        for handle in handles.iter().skip(completed) {
+            handle.abort();
+        }
+    }
+    all_completed
+}
+
+#[cfg(test)]
+mod task_supervisor_tests {
+    use super::*;
+
+    #[test]
+    fn wait_for_snapshot_tasks_reports_completed_tasks() {
+        let handle = tauri::async_runtime::spawn(async {});
+
+        let completed = tauri::async_runtime::block_on(wait_for_snapshot_tasks(
+            vec![handle],
+            Duration::from_secs(1),
+        ));
+
+        assert!(completed);
+    }
+
+    #[test]
+    fn wait_for_snapshot_tasks_aborts_after_timeout() {
+        let handle = tauri::async_runtime::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let completed = tauri::async_runtime::block_on(wait_for_snapshot_tasks(
+            vec![handle],
+            Duration::from_millis(5),
+        ));
+
+        assert!(!completed);
+    }
 }
