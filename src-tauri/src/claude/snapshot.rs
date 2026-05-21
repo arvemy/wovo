@@ -1,15 +1,16 @@
-use crate::account_commands::{
-    list_codex_accounts, managed_account_store, set_system_codex_account_in_store,
-};
 use crate::auto_switch::auto_switch_candidate;
-use crate::codex::auth_store::system_codex_home_path;
-use crate::codex::settings;
-use crate::codex::snapshot_cache;
-use crate::codex::{cost_usage, quota_events};
-use crate::domain::usage::{AccountIssue, CodexOverviewSnapshot, CostUsageSnapshot};
+use crate::claude::account_commands::{
+    list_claude_accounts_inner, set_system_claude_account_in_store,
+};
+use crate::claude::account_store::managed_account_store;
+use crate::claude::auth_store::system_claude_home_path;
+use crate::claude::settings;
+use crate::claude::snapshot_cache;
+use crate::claude::usage_commands::refresh_claude_usage_with_mode;
+use crate::claude::{cost_usage, quota_events};
+use crate::domain::usage::{AccountIssue, ClaudeOverviewSnapshot, CostUsageSnapshot};
 use crate::error::AppError;
-use crate::notifications::send_codex_notifications;
-use crate::usage_commands::refresh_codex_usage_with_mode;
+use crate::notifications::send_claude_notifications;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,38 +21,38 @@ use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-const SNAPSHOT_EVENT: &str = "codex:snapshot-updated";
+const SNAPSHOT_EVENT: &str = "claude:snapshot-updated";
 const REMOTE_USAGE_REFRESH_SECONDS: u64 = 5 * 60;
 const COST_USAGE_REFRESH_SECONDS: u64 = 60 * 60;
 const COST_USAGE_SCAN_TIMEOUT_SECONDS: u64 = 30;
 
 #[tauri::command]
-pub(crate) async fn get_cached_codex_snapshot(
-    coordinator: State<'_, Arc<CodexSnapshotCoordinator>>,
-) -> Result<Option<CodexOverviewSnapshot>, AppError> {
+pub(crate) async fn get_cached_claude_snapshot(
+    coordinator: State<'_, Arc<ClaudeSnapshotCoordinator>>,
+) -> Result<Option<ClaudeOverviewSnapshot>, AppError> {
     Ok(coordinator.cached_snapshot().await)
 }
 
 #[tauri::command]
-pub(crate) async fn refresh_codex_snapshot(
+pub(crate) async fn refresh_claude_snapshot(
     app: AppHandle,
-    coordinator: State<'_, Arc<CodexSnapshotCoordinator>>,
+    coordinator: State<'_, Arc<ClaudeSnapshotCoordinator>>,
     force: bool,
-) -> Result<CodexOverviewSnapshot, AppError> {
+) -> Result<ClaudeOverviewSnapshot, AppError> {
     coordinator.refresh_manual(app, force).await
 }
 
 #[derive(Default)]
-pub(crate) struct CodexSnapshotCoordinator {
-    latest: Mutex<Option<CodexOverviewSnapshot>>,
+pub(crate) struct ClaudeSnapshotCoordinator {
+    latest: Mutex<Option<ClaudeOverviewSnapshot>>,
     latest_generation: Mutex<u64>,
     refresh_lock: Mutex<()>,
     last_cost_refresh_at: Mutex<Option<i64>>,
     cost_scan_running: Arc<AtomicBool>,
 }
 
-impl CodexSnapshotCoordinator {
-    async fn cached_snapshot(&self) -> Option<CodexOverviewSnapshot> {
+impl ClaudeSnapshotCoordinator {
+    async fn cached_snapshot(&self) -> Option<ClaudeOverviewSnapshot> {
         if let Some(snapshot) = self.latest.lock().await.clone() {
             return Some(snapshot);
         }
@@ -67,7 +68,7 @@ impl CodexSnapshotCoordinator {
         &self,
         app: AppHandle,
         force: bool,
-    ) -> Result<CodexOverviewSnapshot, AppError> {
+    ) -> Result<ClaudeOverviewSnapshot, AppError> {
         let observed_generation = if force {
             None
         } else {
@@ -95,7 +96,7 @@ impl CodexSnapshotCoordinator {
         &self,
         app: &AppHandle,
         refresh_cost_now: bool,
-    ) -> Result<CodexOverviewSnapshot, AppError> {
+    ) -> Result<ClaudeOverviewSnapshot, AppError> {
         let previous = self
             .latest
             .lock()
@@ -104,12 +105,12 @@ impl CodexSnapshotCoordinator {
             .or_else(snapshot_cache::load_snapshot);
         let settings = settings::load_settings()?;
         let mode = settings.usage_source_mode;
-        let mut accounts = list_codex_accounts(app.clone()).await?;
+        let mut accounts = list_claude_accounts_inner()?;
         let mut usage_by_account_id = HashMap::new();
         let mut errors_by_account_id = HashMap::new();
 
         for account in &accounts {
-            match refresh_codex_usage_with_mode(app, account.id.clone(), mode).await {
+            match refresh_claude_usage_with_mode(account.id.clone(), mode).await {
                 Ok(snapshot) => {
                     usage_by_account_id.insert(account.id.clone(), snapshot);
                 }
@@ -139,21 +140,21 @@ impl CodexSnapshotCoordinator {
                     if !latest_settings.auto_account_switching_enabled {
                         None
                     } else {
-                        match set_system_codex_account_in_store(
-                            &managed_account_store(app)?,
+                        match set_system_claude_account_in_store(
+                            &managed_account_store(),
                             &candidate.target_account_id,
-                            &system_codex_home_path(),
+                            &system_claude_home_path(),
                         ) {
                             Ok(_) => {
-                                accounts = list_codex_accounts(app.clone()).await?;
+                                accounts = list_claude_accounts_inner()?;
                                 Some(candidate.notification)
                             }
                             Err(error) => {
                                 errors_by_account_id.insert(
                                     candidate.current_account_id,
                                     AccountIssue::new(
-                                        "auto_switch_failed",
-                                        "Auto switch failed.",
+                                        "claude_auto_switch_failed",
+                                        "Claude auto switch failed.",
                                         error.auth_related(),
                                     ),
                                 );
@@ -179,7 +180,7 @@ impl CodexSnapshotCoordinator {
             .await;
 
         let generated_at = OffsetDateTime::now_utc().unix_timestamp();
-        let mut snapshot = CodexOverviewSnapshot {
+        let mut snapshot = ClaudeOverviewSnapshot {
             accounts,
             usage_by_account_id,
             errors_by_account_id,
@@ -192,7 +193,7 @@ impl CodexSnapshotCoordinator {
         snapshot.quota_events = quota_events::detect_quota_events(previous.as_ref(), &snapshot);
 
         self.store_and_emit(app, snapshot.clone()).await;
-        send_codex_notifications(
+        send_claude_notifications(
             app,
             &snapshot.quota_events,
             auto_switch_notification.as_ref(),
@@ -226,12 +227,12 @@ impl CodexSnapshotCoordinator {
             return (previous, None);
         }
 
-        let source_root = system_codex_home_path();
+        let source_root = system_claude_home_path();
         let scan_running = self.cost_scan_running.clone();
         if scan_running.swap(true, Ordering::AcqRel) {
             return (
                 previous,
-                Some("Cost usage scan is still running.".to_string()),
+                Some("Claude cost usage scan is still running.".to_string()),
             );
         }
         let result = tokio::time::timeout(
@@ -242,9 +243,9 @@ impl CodexSnapshotCoordinator {
             }),
         )
         .await
-        .map_err(|_| AppError::AccountStore("cost usage scan timed out".to_string()))
+        .map_err(|_| AppError::ClaudeAccountStore("cost usage scan timed out".to_string()))
         .and_then(|join_result| {
-            join_result.map_err(|error| AppError::AccountStore(error.to_string()))
+            join_result.map_err(|error| AppError::ClaudeAccountStore(error.to_string()))
         })
         .and_then(|result| result);
 
@@ -257,7 +258,7 @@ impl CodexSnapshotCoordinator {
         }
     }
 
-    async fn store_and_emit(&self, app: &AppHandle, snapshot: CodexOverviewSnapshot) {
+    async fn store_and_emit(&self, app: &AppHandle, snapshot: ClaudeOverviewSnapshot) {
         *self.latest.lock().await = Some(snapshot.clone());
         *self.latest_generation.lock().await += 1;
         let _ = app.emit(SNAPSHOT_EVENT, snapshot);
@@ -272,31 +273,11 @@ impl Drop for CostScanGuard {
     }
 }
 
-pub(crate) struct SnapshotTaskSupervisor {
-    cancellation_token: CancellationToken,
-    handles: Vec<JoinHandle<()>>,
-}
-
-impl SnapshotTaskSupervisor {
-    pub(crate) fn add_handles(&mut self, handles: Vec<JoinHandle<()>>) {
-        self.handles.extend(handles);
-    }
-
-    pub(crate) fn shutdown(self, timeout: Duration) {
-        self.cancellation_token.cancel();
-        let completed =
-            tauri::async_runtime::block_on(wait_for_snapshot_tasks(self.handles, timeout));
-        if !completed {
-            eprintln!("snapshot tasks did not stop before shutdown timeout");
-        }
-    }
-}
-
-pub(crate) fn start_codex_snapshot_tasks(
+pub(crate) fn start_claude_snapshot_tasks(
     app: AppHandle,
-    coordinator: Arc<CodexSnapshotCoordinator>,
+    coordinator: Arc<ClaudeSnapshotCoordinator>,
     cancellation_token: CancellationToken,
-) -> SnapshotTaskSupervisor {
+) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     let initial_app = app.clone();
     let initial_coordinator = coordinator.clone();
@@ -330,7 +311,7 @@ pub(crate) fn start_codex_snapshot_tasks(
         }
     }));
 
-    let cost_token = cancellation_token.clone();
+    let cost_token = cancellation_token;
     handles.push(tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
@@ -341,65 +322,5 @@ pub(crate) fn start_codex_snapshot_tasks(
         }
     }));
 
-    SnapshotTaskSupervisor {
-        cancellation_token,
-        handles,
-    }
-}
-
-async fn wait_for_snapshot_tasks(mut handles: Vec<JoinHandle<()>>, timeout: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut completed = 0;
-
-    while completed < handles.len() {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-
-        let remaining = deadline - now;
-        match tokio::time::timeout(remaining, &mut handles[completed]).await {
-            Ok(_) => completed += 1,
-            Err(_) => break,
-        }
-    }
-
-    let all_completed = completed == handles.len();
-    if !all_completed {
-        for handle in handles.iter().skip(completed) {
-            handle.abort();
-        }
-    }
-    all_completed
-}
-
-#[cfg(test)]
-mod task_supervisor_tests {
-    use super::*;
-
-    #[test]
-    fn wait_for_snapshot_tasks_reports_completed_tasks() {
-        let handle = tauri::async_runtime::spawn(async {});
-
-        let completed = tauri::async_runtime::block_on(wait_for_snapshot_tasks(
-            vec![handle],
-            Duration::from_secs(1),
-        ));
-
-        assert!(completed);
-    }
-
-    #[test]
-    fn wait_for_snapshot_tasks_aborts_after_timeout() {
-        let handle = tauri::async_runtime::spawn(async {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        });
-
-        let completed = tauri::async_runtime::block_on(wait_for_snapshot_tasks(
-            vec![handle],
-            Duration::from_millis(5),
-        ));
-
-        assert!(!completed);
-    }
+    handles
 }

@@ -2,6 +2,7 @@ mod account_commands;
 mod app_runtime;
 mod app_updates;
 mod auto_switch;
+mod claude;
 mod codex;
 mod domain;
 mod error;

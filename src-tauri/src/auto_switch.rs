@@ -1,6 +1,6 @@
-use crate::codex::settings::CodexSettings;
 use crate::domain::account::{AccountSourceKind, AccountSummary};
 use crate::domain::usage::{AccountIssue, UsageSnapshot, UsageWindow};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 const AUTO_SWITCH_THRESHOLD_PERCENT: f64 = 90.0;
@@ -10,11 +10,12 @@ const WEEKLY_PENALTY_THRESHOLD: f64 = 20.0;
 enum UsageWindowKey {
     Primary,
     Secondary,
+    Tertiary,
 }
 
 impl UsageWindowKey {
-    fn all() -> [Self; 2] {
-        [Self::Primary, Self::Secondary]
+    fn all() -> [Self; 3] {
+        [Self::Primary, Self::Secondary, Self::Tertiary]
     }
 }
 
@@ -24,7 +25,7 @@ pub(crate) struct AutoSwitchNotification {
     pub(crate) target_account_label: String,
     pub(crate) window_label: String,
     pub(crate) threshold_percent: f64,
-    pub(crate) target_primary_remaining: f64,
+    pub(crate) target_primary_remaining: Option<f64>,
     pub(crate) target_weekly_remaining: f64,
 }
 
@@ -38,7 +39,8 @@ pub(crate) struct AutoSwitchCandidate {
 struct ScoredCandidate<'a> {
     account: &'a AccountSummary,
     score: f64,
-    primary_remaining: f64,
+    window_remaining: f64,
+    primary_remaining: Option<f64>,
     weekly_remaining: f64,
 }
 
@@ -46,18 +48,15 @@ fn compute_switch_score(
     usage: &UsageSnapshot,
     now_secs: i64,
     weekly_penalty_threshold: f64,
-) -> (f64, f64, f64) {
+) -> (f64, Option<f64>, f64) {
     let primary_remaining = usage
         .primary
         .as_ref()
-        .map(|w| normalized_percent(w.remaining_percent))
-        .unwrap_or(0.0);
-
-    let weekly_remaining_opt = usage
-        .secondary
-        .as_ref()
         .map(|w| normalized_percent(w.remaining_percent));
+
+    let weekly_remaining_opt = constrained_weekly_remaining(usage);
     let weekly_remaining = weekly_remaining_opt.unwrap_or(100.0);
+    let score_base_remaining = primary_remaining.or(weekly_remaining_opt).unwrap_or(0.0);
 
     let weekly_multiplier = if weekly_penalty_threshold <= 0.0 {
         1.0
@@ -77,7 +76,7 @@ fn compute_switch_score(
     };
 
     let weekly_tiebreaker = weekly_remaining_opt
-        .map(|w| w * 0.05 * (primary_remaining / 100.0))
+        .map(|w| w * 0.05 * (score_base_remaining / 100.0))
         .unwrap_or(0.0);
 
     let reset_bonus = usage
@@ -92,7 +91,7 @@ fn compute_switch_score(
         })
         .unwrap_or(0.0);
 
-    let score = primary_remaining * weekly_multiplier + weekly_tiebreaker + reset_bonus;
+    let score = score_base_remaining * weekly_multiplier + weekly_tiebreaker + reset_bonus;
     (score, primary_remaining, weekly_remaining)
 }
 
@@ -100,7 +99,6 @@ pub(crate) fn auto_switch_candidate(
     accounts: &[AccountSummary],
     usage_by_account_id: &HashMap<String, UsageSnapshot>,
     errors_by_account_id: &HashMap<String, AccountIssue>,
-    _settings: &CodexSettings,
 ) -> Option<AutoSwitchCandidate> {
     let current = accounts
         .iter()
@@ -121,7 +119,7 @@ pub(crate) fn auto_switch_candidate(
     for window_key in UsageWindowKey::all() {
         let trigger_threshold = match window_key {
             UsageWindowKey::Primary => AUTO_SWITCH_THRESHOLD_PERCENT,
-            UsageWindowKey::Secondary => 100.0,
+            UsageWindowKey::Secondary | UsageWindowKey::Tertiary => 100.0,
         };
         let candidate_threshold = trigger_threshold;
 
@@ -149,18 +147,14 @@ pub(crate) fn auto_switch_candidate(
 
             let window_used = normalized_percent(window.used_percent);
             let window_remaining = normalized_percent(window.remaining_percent);
-            let primary_remaining = normalized_percent(
-                usage_window_by_key(usage, UsageWindowKey::Primary)
-                    .map(|w| w.remaining_percent)
-                    .unwrap_or(0.0),
-            );
-            let secondary_remaining = usage_window_by_key(usage, UsageWindowKey::Secondary)
+            let primary_remaining = usage_window_by_key(usage, UsageWindowKey::Primary)
                 .map(|w| normalized_percent(w.remaining_percent));
+            let weekly_remaining = constrained_weekly_remaining(usage);
 
             if window_used >= candidate_threshold
                 || window_remaining <= 0.0
-                || primary_remaining < min_target_remaining
-                || matches!(secondary_remaining, Some(remaining) if remaining <= 0.0)
+                || matches!(primary_remaining, Some(remaining) if remaining < min_target_remaining)
+                || matches!(weekly_remaining, Some(remaining) if remaining <= 0.0)
             {
                 continue;
             }
@@ -169,11 +163,13 @@ pub(crate) fn auto_switch_candidate(
                 compute_switch_score(usage, now_secs, WEEKLY_PENALTY_THRESHOLD);
 
             match best_target {
-                Some(ref b) if score <= b.score => {}
+                Some(ref b)
+                    if !candidate_score_is_better(score, window_remaining, b, window_key) => {}
                 _ => {
                     best_target = Some(ScoredCandidate {
                         account,
                         score,
+                        window_remaining,
                         primary_remaining: prem,
                         weekly_remaining: wrem,
                     });
@@ -200,11 +196,35 @@ pub(crate) fn auto_switch_candidate(
     None
 }
 
+fn candidate_score_is_better(
+    score: f64,
+    window_remaining: f64,
+    best: &ScoredCandidate<'_>,
+    window_key: UsageWindowKey,
+) -> bool {
+    match score.partial_cmp(&best.score).unwrap_or(Ordering::Less) {
+        Ordering::Greater => true,
+        Ordering::Equal if window_key == UsageWindowKey::Tertiary => {
+            window_remaining > best.window_remaining
+        }
+        Ordering::Equal | Ordering::Less => false,
+    }
+}
+
 fn usage_window_by_key(usage: &UsageSnapshot, window_key: UsageWindowKey) -> Option<&UsageWindow> {
     match window_key {
         UsageWindowKey::Primary => usage.primary.as_ref(),
         UsageWindowKey::Secondary => usage.secondary.as_ref(),
+        UsageWindowKey::Tertiary => usage.tertiary.as_ref(),
     }
+}
+
+fn constrained_weekly_remaining(usage: &UsageSnapshot) -> Option<f64> {
+    [UsageWindowKey::Secondary, UsageWindowKey::Tertiary]
+        .into_iter()
+        .filter_map(|window_key| usage_window_by_key(usage, window_key))
+        .map(|window| normalized_percent(window.remaining_percent))
+        .reduce(f64::min)
 }
 
 fn normalized_percent(value: f64) -> f64 {

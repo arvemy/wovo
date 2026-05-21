@@ -10,6 +10,12 @@ use super::SnapshotActions;
 
 #[derive(Clone, Copy)]
 pub(crate) struct AccountActions {
+    pub(crate) add_command: &'static str,
+    pub(crate) cancel_login_command: &'static str,
+    pub(crate) reauthenticate_command: &'static str,
+    pub(crate) remove_command: &'static str,
+    pub(crate) set_system_command: &'static str,
+    pub(crate) provider_label: &'static str,
     pub(crate) account_epoch: RequestEpoch,
     pub(crate) is_account_login_loading: ReadSignal<bool>,
     pub(crate) set_is_account_action_loading: WriteSignal<bool>,
@@ -37,7 +43,7 @@ impl AccountActions {
             actions.set_global_error.set(None);
 
             let result =
-                invoke_tauri::<AccountSummary>("add_codex_account", JsValue::UNDEFINED).await;
+                invoke_tauri::<AccountSummary>(actions.add_command, JsValue::UNDEFINED).await;
             if !actions.account_epoch.is_current(ticket) {
                 return;
             }
@@ -60,14 +66,14 @@ impl AccountActions {
         let actions = *self;
         spawn_local(async move {
             let result =
-                invoke_tauri::<bool>("cancel_codex_account_login", JsValue::UNDEFINED).await;
+                invoke_tauri::<bool>(actions.cancel_login_command, JsValue::UNDEFINED).await;
 
             match result {
                 Ok(true) => {
                     actions.account_epoch.next();
                     actions
                         .set_global_error
-                        .set(Some("Codex login cancelled.".to_string()));
+                        .set(Some(format!("{} login cancelled.", actions.provider_label)));
                     actions.set_is_account_login_loading.set(false);
                     actions.set_is_account_action_loading.set(false);
                 }
@@ -86,7 +92,7 @@ impl AccountActions {
             actions.set_global_error.set(None);
 
             let result =
-                account_action::<AccountSummary>("reauthenticate_codex_account", &account_id).await;
+                account_action::<AccountSummary>(actions.reauthenticate_command, &account_id).await;
             if !actions.account_epoch.is_current(ticket) {
                 return;
             }
@@ -113,7 +119,7 @@ impl AccountActions {
             actions.set_is_account_action_loading.set(true);
             actions.set_global_error.set(None);
 
-            let result = account_action::<()>("remove_codex_account", &account_id).await;
+            let result = account_action::<()>(actions.remove_command, &account_id).await;
             if !actions.account_epoch.is_current(ticket) {
                 return;
             }
@@ -158,7 +164,7 @@ impl AccountActions {
             actions.set_global_error.set(None);
 
             let result =
-                account_action::<AccountSummary>("set_system_codex_account", &account_id).await;
+                account_action::<AccountSummary>(actions.set_system_command, &account_id).await;
             if !actions.account_epoch.is_current(ticket) {
                 return;
             }

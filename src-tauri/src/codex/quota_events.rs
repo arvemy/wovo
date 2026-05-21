@@ -253,6 +253,7 @@ mod tests {
             plan_type: Some("pro".to_string()),
             primary: Some(window("5h limit", primary_used)),
             secondary: Some(window("Weekly limit", secondary_used)),
+            tertiary: None,
             credits: Some(CreditsSnapshot {
                 balance: None,
                 has_credits: false,

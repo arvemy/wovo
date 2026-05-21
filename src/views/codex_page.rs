@@ -11,6 +11,8 @@ use leptos::prelude::*;
 
 #[derive(Clone, Copy)]
 pub(crate) struct CodexPageData {
+    pub(crate) provider_label: &'static str,
+    pub(crate) login_hint: &'static str,
     pub(crate) visible_quota_events: Memo<Vec<QuotaEvent>>,
     pub(crate) any_loading: Memo<bool>,
     pub(crate) latest_updated_at: Memo<Option<i64>>,
@@ -28,6 +30,8 @@ pub(crate) struct CodexPageActions {
 #[component]
 pub fn CodexPage(data: CodexPageData, actions: CodexPageActions) -> impl IntoView {
     let visible_quota_events = data.visible_quota_events;
+    let provider_label = data.provider_label;
+    let login_hint = data.login_hint;
     let any_loading = data.any_loading;
     let latest_updated_at = data.latest_updated_at;
     let account_action_in_flight = data.account_action_in_flight;
@@ -108,16 +112,16 @@ pub fn CodexPage(data: CodexPageData, actions: CodexPageActions) -> impl IntoVie
                                     <Skeleton class="h-24 w-full"/>
                                     <div class="flex items-center justify-center gap-2 py-4 text-center">
                                         <LoaderCircle class="size-4 animate-spin text-muted-foreground"/>
-                                        <p class="text-xs font-medium text-muted-foreground">"Checking Codex"</p>
+                                        <p class="text-xs font-medium text-muted-foreground">{format!("Checking {provider_label}")}</p>
                                     </div>
                                 </div>
                             }.into_any()
                         } else {
                             view! {
                                 <div class="flex flex-col items-center justify-center gap-2 py-12 text-center">
-                                    <h2 class="text-sm font-semibold leading-none">"No Codex account found"</h2>
+                                    <h2 class="text-sm font-semibold leading-none">{format!("No {provider_label} account found")}</h2>
                                     <p class="text-xs text-muted-foreground">
-                                        "Use the + button above to add an account, or run `codex login`."
+                                        {login_hint}
                                     </p>
                                 </div>
                             }.into_any()

@@ -29,6 +29,8 @@ pub struct UsageSnapshot {
     pub plan_type: Option<String>,
     pub primary: Option<UsageWindow>,
     pub secondary: Option<UsageWindow>,
+    #[serde(default)]
+    pub tertiary: Option<UsageWindow>,
     pub credits: Option<CreditsSnapshot>,
     pub updated_at: i64,
 }
@@ -113,6 +115,21 @@ impl AccountIssue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexOverviewSnapshot {
+    pub accounts: Vec<AccountSummary>,
+    pub usage_by_account_id: HashMap<String, UsageSnapshot>,
+    #[serde(default, deserialize_with = "deserialize_account_issues")]
+    pub errors_by_account_id: HashMap<String, AccountIssue>,
+    #[serde(default)]
+    pub quota_events: Vec<QuotaEvent>,
+    pub cost_usage: Option<CostUsageSnapshot>,
+    pub cost_error: Option<String>,
+    pub generated_at: i64,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeOverviewSnapshot {
     pub accounts: Vec<AccountSummary>,
     pub usage_by_account_id: HashMap<String, UsageSnapshot>,
     #[serde(default, deserialize_with = "deserialize_account_issues")]

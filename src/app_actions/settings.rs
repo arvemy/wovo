@@ -13,6 +13,13 @@ use super::{NotificationActions, SnapshotActions};
 
 #[derive(Clone, Copy)]
 pub(crate) struct SettingsActions {
+    pub(crate) get_settings_command: &'static str,
+    pub(crate) set_usage_source_command: &'static str,
+    pub(crate) set_cost_usage_command: &'static str,
+    pub(crate) set_notifications_command: &'static str,
+    pub(crate) set_auto_switching_command: &'static str,
+    pub(crate) set_hide_credentials_command: &'static str,
+    pub(crate) include_launch_on_login: bool,
     pub(crate) usage_source_mode: ReadSignal<CodexUsageSourceMode>,
     pub(crate) set_usage_source_mode: WriteSignal<CodexUsageSourceMode>,
     pub(crate) cost_usage_enabled: ReadSignal<bool>,
@@ -43,7 +50,9 @@ impl SettingsActions {
             .set(settings.auto_account_switching_enabled);
         self.set_hide_account_credentials
             .set(settings.hide_account_credentials);
-        self.set_launch_on_login.set(settings.launch_on_login);
+        if self.include_launch_on_login {
+            self.set_launch_on_login.set(settings.launch_on_login);
+        }
     }
 
     pub(crate) fn load(&self) {
@@ -52,7 +61,8 @@ impl SettingsActions {
         spawn_local(async move {
             actions.set_is_settings_loading.set(true);
             let result =
-                invoke_tauri::<CodexSettings>("get_codex_settings", JsValue::UNDEFINED).await;
+                invoke_tauri::<CodexSettings>(actions.get_settings_command, JsValue::UNDEFINED)
+                    .await;
             if !actions.settings_epoch.is_current(ticket) {
                 return;
             }
@@ -80,7 +90,9 @@ impl SettingsActions {
                 usage_source_mode: mode,
             }) {
                 Ok(args) => {
-                    match invoke_tauri::<CodexSettings>("set_codex_usage_source_mode", args).await {
+                    match invoke_tauri::<CodexSettings>(actions.set_usage_source_command, args)
+                        .await
+                    {
                         Ok(settings) => {
                             if !actions.settings_epoch.is_current(ticket) {
                                 return;
@@ -129,7 +141,7 @@ impl SettingsActions {
             actions.set_global_error.set(None);
             match command_args(&SetCostUsageEnabledArgs { enabled }) {
                 Ok(args) => {
-                    match invoke_tauri::<CodexSettings>("set_codex_cost_usage_enabled", args).await
+                    match invoke_tauri::<CodexSettings>(actions.set_cost_usage_command, args).await
                     {
                         Ok(settings) => {
                             if !actions.settings_epoch.is_current(ticket) {
@@ -175,7 +187,7 @@ impl SettingsActions {
             actions.set_global_error.set(None);
             match command_args(&SetNotificationsEnabledArgs { enabled }) {
                 Ok(args) => {
-                    match invoke_tauri::<CodexSettings>("set_codex_notifications_enabled", args)
+                    match invoke_tauri::<CodexSettings>(actions.set_notifications_command, args)
                         .await
                     {
                         Ok(settings) => {
@@ -222,11 +234,8 @@ impl SettingsActions {
             actions.set_global_error.set(None);
             match command_args(&SetAutoAccountSwitchingEnabledArgs { enabled }) {
                 Ok(args) => {
-                    match invoke_tauri::<CodexSettings>(
-                        "set_codex_auto_account_switching_enabled",
-                        args,
-                    )
-                    .await
+                    match invoke_tauri::<CodexSettings>(actions.set_auto_switching_command, args)
+                        .await
                     {
                         Ok(settings) => {
                             if !actions.settings_epoch.is_current(ticket) {
@@ -277,7 +286,7 @@ impl SettingsActions {
             actions.set_global_error.set(None);
             match command_args(&SetHideAccountCredentialsArgs { enabled }) {
                 Ok(args) => {
-                    match invoke_tauri::<CodexSettings>("set_codex_hide_account_credentials", args)
+                    match invoke_tauri::<CodexSettings>(actions.set_hide_credentials_command, args)
                         .await
                     {
                         Ok(settings) => {

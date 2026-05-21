@@ -1,3 +1,5 @@
+use crate::claude::settings::ClaudeSettings;
+use crate::claude::snapshot::ClaudeSnapshotCoordinator;
 use crate::codex::settings::{self, CodexSettings};
 use crate::snapshot::CodexSnapshotCoordinator;
 use std::sync::Arc;
@@ -17,6 +19,7 @@ const ID_HIDE_CREDENTIALS: &str = "tray_toggle_hide_credentials";
 const ID_LAUNCH_ON_LOGIN: &str = "tray_toggle_launch_on_login";
 const ID_QUIT: &str = "tray_quit";
 const SETTINGS_EVENT: &str = "codex:settings-updated";
+const CLAUDE_SETTINGS_EVENT: &str = "claude:settings-updated";
 
 pub(crate) struct TrayMenuState {
     notifications: CheckMenuItem<Wry>,
@@ -142,6 +145,10 @@ pub(crate) fn publish_settings_update(app: &AppHandle, settings: &CodexSettings)
     let _ = app.emit(SETTINGS_EVENT, settings);
 }
 
+pub(crate) fn publish_claude_settings_update(app: &AppHandle, settings: &ClaudeSettings) {
+    let _ = app.emit(CLAUDE_SETTINGS_EVENT, settings);
+}
+
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         ID_SHOW_HIDE => toggle_main_window(app),
@@ -194,10 +201,19 @@ fn update_bool_setting(
 
 fn refresh_accounts(app: &AppHandle) {
     let coordinator = app.state::<Arc<CodexSnapshotCoordinator>>().inner().clone();
-    let app = app.clone();
+    let claude_coordinator = app
+        .try_state::<Arc<ClaudeSnapshotCoordinator>>()
+        .map(|state| state.inner().clone());
+    let codex_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = coordinator.refresh_manual(app, true).await;
+        let _ = coordinator.refresh_manual(codex_app, true).await;
     });
+    if let Some(coordinator) = claude_coordinator {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = coordinator.refresh_manual(app, true).await;
+        });
+    }
 }
 
 fn sync_tray_settings(app: &AppHandle, settings: &CodexSettings) {

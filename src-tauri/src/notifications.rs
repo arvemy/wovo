@@ -243,17 +243,45 @@ pub(crate) fn send_codex_notifications(
     enabled: bool,
     hide_credentials: bool,
 ) {
+    send_provider_notifications(app, "Codex", events, auto_switch, enabled, hide_credentials)
+}
+
+pub(crate) fn send_claude_notifications(
+    app: &AppHandle,
+    events: &[QuotaEvent],
+    auto_switch: Option<&AutoSwitchNotification>,
+    enabled: bool,
+    hide_credentials: bool,
+) {
+    send_provider_notifications(
+        app,
+        "Claude Code",
+        events,
+        auto_switch,
+        enabled,
+        hide_credentials,
+    )
+}
+
+fn send_provider_notifications(
+    app: &AppHandle,
+    provider_label: &str,
+    events: &[QuotaEvent],
+    auto_switch: Option<&AutoSwitchNotification>,
+    enabled: bool,
+    hide_credentials: bool,
+) {
     if !enabled || (events.is_empty() && auto_switch.is_none()) {
         return;
     }
 
     for event in events {
-        let payload = quota_event_notification(event, hide_credentials);
+        let payload = quota_event_notification(provider_label, event, hide_credentials);
         let _ = show_notification(app, payload.title, payload.body);
     }
 
     if let Some(auto_switch) = auto_switch {
-        let payload = auto_switch_notification(auto_switch, hide_credentials);
+        let payload = auto_switch_notification(provider_label, auto_switch, hide_credentials);
         let _ = show_notification(app, payload.title, payload.body);
     }
 }
@@ -453,7 +481,11 @@ fn record_diagnostics(app: &AppHandle, diagnostics: NotificationDiagnostics) {
     }
 }
 
-fn quota_event_notification(event: &QuotaEvent, hide_credentials: bool) -> CodexNotification {
+fn quota_event_notification(
+    provider_label: &str,
+    event: &QuotaEvent,
+    hide_credentials: bool,
+) -> CodexNotification {
     if !hide_credentials {
         return CodexNotification {
             title: event.title.clone(),
@@ -463,12 +495,12 @@ fn quota_event_notification(event: &QuotaEvent, hide_credentials: bool) -> Codex
 
     let body = match event.kind {
         QuotaEventKind::Warning => format!(
-            "A Codex account's {} is {:.0}% used.",
+            "A {provider_label} account's {} is {:.0}% used.",
             event.window_label,
             event.used_percent.clamp(0.0, 100.0)
         ),
         QuotaEventKind::Reset => format!(
-            "A Codex account's {} dropped to {:.0}% used.",
+            "A {provider_label} account's {} dropped to {:.0}% used.",
             event.window_label,
             event.used_percent.clamp(0.0, 100.0)
         ),
@@ -481,29 +513,39 @@ fn quota_event_notification(event: &QuotaEvent, hide_credentials: bool) -> Codex
 }
 
 fn auto_switch_notification(
+    provider_label: &str,
     event: &AutoSwitchNotification,
     hide_credentials: bool,
 ) -> CodexNotification {
     let body = if hide_credentials {
         format!(
-            "Wovo switched to another Codex account because {} reached the {:.0}% auto-switch threshold.",
+            "Wovo switched to another {provider_label} account because {} reached the {:.0}% auto-switch threshold.",
             event.window_label,
             event.threshold_percent.clamp(0.0, 100.0),
         )
     } else {
+        let target_remaining = match event.target_primary_remaining {
+            Some(primary_remaining) => format!(
+                "Target account: {:.0}% 5h, {:.0}% weekly remaining.",
+                primary_remaining, event.target_weekly_remaining,
+            ),
+            None => format!(
+                "Target account: {:.0}% weekly remaining.",
+                event.target_weekly_remaining,
+            ),
+        };
         format!(
-            "Wovo switched from {} to {} because {} reached the {:.0}% auto-switch threshold. Target account: {:.0}% 5h, {:.0}% weekly remaining.",
+            "Wovo switched from {} to {} because {} reached the {:.0}% auto-switch threshold. {}",
             event.current_account_label,
             event.target_account_label,
             event.window_label,
             event.threshold_percent.clamp(0.0, 100.0),
-            event.target_primary_remaining,
-            event.target_weekly_remaining,
+            target_remaining,
         )
     };
 
     CodexNotification {
-        title: "Codex account switched".to_string(),
+        title: format!("{provider_label} account switched"),
         body,
     }
 }

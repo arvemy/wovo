@@ -26,6 +26,7 @@ where
     ISO: Fn() -> bool + Send + Sync + 'static,
 {
     let on_select_provider = StoredValue::new(on_select_provider);
+    let active_provider = StoredValue::new(active_provider);
     let is_listing = StoredValue::new(is_listing);
     let is_account_login_loading = StoredValue::new(is_account_login_loading);
     let any_action_in_flight = StoredValue::new(any_action_in_flight);
@@ -38,7 +39,7 @@ where
     view! {
         <nav class="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border">
             <ProviderNav
-                active=active_provider
+                active=move || active_provider.with_value(|f| f())
                 on_select=Box::new(move |page| on_select_provider.with_value(|f| f(page)))
             />
             <div class="flex shrink-0 items-center gap-2">
@@ -48,9 +49,9 @@ where
                     type="button"
                     aria-label=move || {
                         if is_account_login_loading.with_value(|f| f()) {
-                            "Cancel login"
+                            format!("Cancel {} login", active_provider.with_value(|f| f()).label())
                         } else {
-                            "Add Codex account"
+                            format!("Add {} account", active_provider.with_value(|f| f()).label())
                         }
                     }
                     aria-busy=move || is_account_login_loading.with_value(|f| f()).to_string()
@@ -89,7 +90,7 @@ where
                 <button
                     class=ButtonClass { variant: ButtonVariant::Outline, size: ButtonSize::Icon }.with_class("")
                     type="button"
-                    aria-label="Refresh all accounts"
+                    aria-label=move || format!("Refresh {} accounts", active_provider.with_value(|f| f()).label())
                     aria-busy=move || (is_listing.with_value(|f| f()) || any_loading.get()).to_string()
                     aria-disabled=move || (is_listing.with_value(|f| f()) || any_action_in_flight.with_value(|f| f())).to_string()
                     disabled=move || is_listing.with_value(|f| f()) || any_action_in_flight.with_value(|f| f())

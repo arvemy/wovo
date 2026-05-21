@@ -16,17 +16,18 @@ use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 pub(crate) struct SettingsPanelState {
     pub(crate) is_open: ReadSignal<bool>,
     pub(crate) theme_mode: ReadSignal<ThemeMode>,
-    pub(crate) usage_source_mode: ReadSignal<CodexUsageSourceMode>,
-    pub(crate) cost_usage_enabled: ReadSignal<bool>,
-    pub(crate) notifications_enabled: ReadSignal<bool>,
+    pub(crate) active_provider_label: Signal<&'static str>,
+    pub(crate) usage_source_mode: Signal<CodexUsageSourceMode>,
+    pub(crate) cost_usage_enabled: Signal<bool>,
+    pub(crate) notifications_enabled: Signal<bool>,
     pub(crate) notification_status: ReadSignal<Option<NotificationStatus>>,
     pub(crate) is_notification_test_sending: ReadSignal<bool>,
-    pub(crate) hide_account_credentials: ReadSignal<bool>,
+    pub(crate) hide_account_credentials: Signal<bool>,
     pub(crate) launch_on_login: ReadSignal<bool>,
-    pub(crate) auto_account_switching_enabled: ReadSignal<bool>,
+    pub(crate) auto_account_switching_enabled: Signal<bool>,
     pub(crate) auto_switch_runway: Memo<Option<AutoSwitchRunwayEstimate>>,
     pub(crate) is_settings_loading: ReadSignal<bool>,
-    pub(crate) is_listing: ReadSignal<bool>,
+    pub(crate) is_listing: Signal<bool>,
 }
 
 pub(crate) struct SettingsPanelActions {
@@ -46,6 +47,7 @@ pub(crate) struct SettingsPanelActions {
 pub fn SettingsPanel(state: SettingsPanelState, actions: SettingsPanelActions) -> impl IntoView {
     let is_open = state.is_open;
     let theme_mode = state.theme_mode;
+    let active_provider_label = state.active_provider_label;
     let usage_source_mode = state.usage_source_mode;
     let cost_usage_enabled = state.cost_usage_enabled;
     let notifications_enabled = state.notifications_enabled;
@@ -162,7 +164,7 @@ pub fn SettingsPanel(state: SettingsPanelState, actions: SettingsPanelActions) -
                 // ── Data ──
                 <SettingsSection label="Data">
                     <div class="mb-2">
-                        <p class="mb-1.5 text-xs font-medium">"Usage source"</p>
+                        <p class="mb-1.5 text-xs font-medium">{move || format!("{} usage source", active_provider_label.get())}</p>
                         <div
                             class="inline-grid h-8 w-full grid-cols-3 rounded-md border border-border bg-secondary p-0.5"
                             role="group"

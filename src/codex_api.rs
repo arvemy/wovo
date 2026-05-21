@@ -43,6 +43,8 @@ pub(crate) struct UsageSnapshot {
     pub(crate) plan_type: Option<String>,
     pub(crate) primary: Option<UsageWindow>,
     pub(crate) secondary: Option<UsageWindow>,
+    #[serde(default)]
+    pub(crate) tertiary: Option<UsageWindow>,
     pub(crate) credits: Option<CreditsSnapshot>,
     pub(crate) updated_at: i64,
 }
@@ -306,10 +308,13 @@ impl CommandError {
     }
 }
 
-pub(crate) async fn refresh_snapshot(force: bool) -> Result<CodexOverviewSnapshot, CommandError> {
+pub(crate) async fn refresh_snapshot(
+    cmd: &str,
+    force: bool,
+) -> Result<CodexOverviewSnapshot, CommandError> {
     let args = serde_wasm_bindgen::to_value(&RefreshSnapshotArgs { force })
         .map_err(|error| CommandError::from_message(error.to_string()))?;
-    invoke_tauri("refresh_codex_snapshot", args).await
+    invoke_tauri(cmd, args).await
 }
 
 pub(crate) async fn account_action<T>(cmd: &str, account_id: &str) -> Result<T, CommandError>
@@ -374,7 +379,9 @@ struct InvokePolicy {
 
 fn policy_for_command(cmd: &str) -> InvokePolicy {
     match cmd {
-        "get_cached_codex_snapshot"
+        "get_cached_claude_snapshot"
+        | "get_cached_codex_snapshot"
+        | "get_claude_settings"
         | "get_codex_settings"
         | "get_codex_notification_status"
         | "check_app_update" => InvokePolicy {
@@ -382,12 +389,24 @@ fn policy_for_command(cmd: &str) -> InvokePolicy {
             retries: 2,
             retry_delay_ms: 1_000,
         },
+        "refresh_claude_snapshot" | "refresh_claude_usage" | "refresh_all_claude_usage" => {
+            InvokePolicy {
+                timeout_ms: 0,
+                retries: 0,
+                retry_delay_ms: 0,
+            }
+        }
         "refresh_codex_snapshot" | "refresh_codex_usage" | "refresh_all_usage" => InvokePolicy {
             timeout_ms: 60_000,
             retries: 0,
             retry_delay_ms: 0,
         },
-        "set_codex_usage_source_mode"
+        "set_claude_usage_source_mode"
+        | "set_claude_cost_usage_enabled"
+        | "set_claude_notifications_enabled"
+        | "set_claude_auto_account_switching_enabled"
+        | "set_claude_hide_account_credentials"
+        | "set_codex_usage_source_mode"
         | "set_codex_cost_usage_enabled"
         | "set_codex_notifications_enabled"
         | "set_codex_auto_account_switching_enabled"
@@ -398,7 +417,12 @@ fn policy_for_command(cmd: &str) -> InvokePolicy {
             retries: 0,
             retry_delay_ms: 0,
         },
-        "add_codex_account"
+        "add_claude_account"
+        | "reauthenticate_claude_account"
+        | "cancel_claude_account_login"
+        | "remove_claude_account"
+        | "set_system_claude_account"
+        | "add_codex_account"
         | "reauthenticate_codex_account"
         | "cancel_codex_account_login"
         | "remove_codex_account"
@@ -439,6 +463,24 @@ mod tests {
     fn login_commands_are_not_timed_out_by_frontend() {
         let policy = policy_for_command("add_codex_account");
         assert_eq!(policy.timeout_ms, 0);
+        assert_eq!(policy.retries, 0);
+    }
+
+    #[test]
+    fn claude_refresh_commands_are_not_timed_out_by_frontend() {
+        let policy = policy_for_command("refresh_claude_snapshot");
+        assert_eq!(policy.timeout_ms, 0);
+        assert_eq!(policy.retries, 0);
+
+        let policy = policy_for_command("refresh_all_claude_usage");
+        assert_eq!(policy.timeout_ms, 0);
+        assert_eq!(policy.retries, 0);
+    }
+
+    #[test]
+    fn codex_refresh_commands_keep_bounded_frontend_timeout() {
+        let policy = policy_for_command("refresh_codex_snapshot");
+        assert_eq!(policy.timeout_ms, 60_000);
         assert_eq!(policy.retries, 0);
     }
 }

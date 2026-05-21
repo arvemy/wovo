@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const executable = require.resolve("conventional-changelog-cli/cli.js");
+const packageEntry = fileURLToPath(import.meta.resolve("conventional-changelog"));
+const executable = join(dirname(packageEntry), "cli", "index.js");
 const currentTag = currentReleaseTag();
 
 const notes = execFileSync(
   process.execPath,
-  [executable, "-p", "conventionalcommits", "-r", "2"],
+  [executable, "-p", "conventionalcommits", "-r", "2", "--stdout"],
   {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],

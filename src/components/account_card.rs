@@ -21,13 +21,29 @@ pub struct UsageRunwayEstimate {
 }
 
 pub fn weekly_runway_estimate(usage: &UsageSnapshot) -> Option<UsageRunwayEstimate> {
-    usage
-        .secondary
-        .as_ref()
-        .and_then(|window| weekly_window_estimate(window, js_sys::Date::now() / 1000.0))
+    weekly_runway_estimate_at(usage, js_sys::Date::now() / 1000.0)
 }
 
-fn weekly_window_estimate(window: &UsageWindow, now: f64) -> Option<UsageRunwayEstimate> {
+fn weekly_runway_estimate_at(usage: &UsageSnapshot, now: f64) -> Option<UsageRunwayEstimate> {
+    constrained_weekly_window(usage).and_then(|window| usage_window_runway_estimate(window, now))
+}
+
+fn constrained_weekly_window(usage: &UsageSnapshot) -> Option<&UsageWindow> {
+    [usage.secondary.as_ref(), usage.tertiary.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|window| finite_percent(window.remaining_percent).is_some())
+        .min_by(|left, right| {
+            let left_remaining = finite_percent(left.remaining_percent).unwrap_or(0.0);
+            let right_remaining = finite_percent(right.remaining_percent).unwrap_or(0.0);
+            left_remaining.total_cmp(&right_remaining)
+        })
+}
+
+pub(crate) fn usage_window_runway_estimate(
+    window: &UsageWindow,
+    now: f64,
+) -> Option<UsageRunwayEstimate> {
     let reset_at = window.reset_at?;
     let window_seconds = window
         .window_seconds
@@ -135,9 +151,12 @@ where
     let usage_source = move || usage.with_value(|f| f().map(|s| s.source));
     let primary = move || usage.with_value(|f| f().and_then(|s| s.primary));
     let secondary = move || usage.with_value(|f| f().and_then(|s| s.secondary));
+    let tertiary = move || usage.with_value(|f| f().and_then(|s| s.tertiary));
     let credits = move || usage.with_value(|f| f().and_then(|s| s.credits));
     let has_usage = move || usage.with_value(|f| f().is_some());
-    let has_weekly_window = move || usage.with_value(|f| f().and_then(|s| s.secondary).is_some());
+    let has_weekly_window = move || {
+        usage.with_value(|f| f().is_some_and(|s| s.secondary.is_some() || s.tertiary.is_some()))
+    };
     let weekly_estimate =
         move || usage.with_value(|f| f().and_then(|snapshot| weekly_runway_estimate(&snapshot)));
 
@@ -254,6 +273,11 @@ where
             <div class="grid gap-3">
                 {move || primary().map(|window| view! { <UsageMeter window=window/> })}
                 {move || secondary().map(|window| view! {
+                    <div class="border-t border-border/50 pt-3">
+                        <UsageMeter window=window/>
+                    </div>
+                })}
+                {move || tertiary().map(|window| view! {
                     <div class="border-t border-border/50 pt-3">
                         <UsageMeter window=window/>
                     </div>
@@ -398,11 +422,31 @@ fn render_credits(credits: CreditsSnapshot) -> Option<impl IntoView> {
 mod tests {
     use super::*;
 
+    fn usage(secondary: UsageWindow, tertiary: Option<UsageWindow>) -> UsageSnapshot {
+        UsageSnapshot {
+            source: "oauth".to_string(),
+            plan_type: None,
+            primary: None,
+            secondary: Some(secondary),
+            tertiary,
+            credits: None,
+            updated_at: 1,
+        }
+    }
+
     fn weekly_window(window_seconds: Option<i64>) -> UsageWindow {
+        weekly_window_with_percent(20.0, 80.0, window_seconds)
+    }
+
+    fn weekly_window_with_percent(
+        used_percent: f64,
+        remaining_percent: f64,
+        window_seconds: Option<i64>,
+    ) -> UsageWindow {
         UsageWindow {
             label: "Weekly limit".to_string(),
-            used_percent: 20.0,
-            remaining_percent: 80.0,
+            used_percent,
+            remaining_percent,
             reset_at: Some(1_700_259_200),
             window_seconds,
         }
@@ -410,7 +454,7 @@ mod tests {
 
     #[test]
     fn weekly_window_estimate_defaults_missing_window_seconds_to_seven_days() {
-        let estimate = weekly_window_estimate(&weekly_window(None), 1_700_000_000.0).unwrap();
+        let estimate = usage_window_runway_estimate(&weekly_window(None), 1_700_000_000.0).unwrap();
 
         assert!((estimate.rate_percent_per_day - 5.0).abs() < f64::EPSILON);
         assert!((estimate.days_until_limit - 16.0).abs() < f64::EPSILON);
@@ -418,6 +462,23 @@ mod tests {
 
     #[test]
     fn weekly_window_estimate_rejects_non_positive_window_seconds() {
-        assert!(weekly_window_estimate(&weekly_window(Some(0)), 1_700_000_000.0).is_none());
+        assert!(usage_window_runway_estimate(&weekly_window(Some(0)), 1_700_000_000.0).is_none());
+    }
+
+    #[test]
+    fn weekly_runway_estimate_uses_more_constrained_model_window() {
+        let usage = usage(
+            weekly_window_with_percent(20.0, 80.0, Some(DEFAULT_WEEKLY_WINDOW_SECONDS)),
+            Some(weekly_window_with_percent(
+                95.0,
+                5.0,
+                Some(DEFAULT_WEEKLY_WINDOW_SECONDS),
+            )),
+        );
+
+        let estimate = weekly_runway_estimate_at(&usage, 1_700_000_000.0).unwrap();
+
+        assert!((estimate.rate_percent_per_day - 23.75).abs() < f64::EPSILON);
+        assert!((estimate.days_until_limit - (5.0 / 23.75)).abs() < f64::EPSILON);
     }
 }

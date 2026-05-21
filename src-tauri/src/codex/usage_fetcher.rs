@@ -377,6 +377,7 @@ fn normalize_oauth_usage(
         plan_type: response.plan_type,
         primary,
         secondary,
+        tertiary: None,
         credits: response.credits.map(normalize_credits),
         updated_at: OffsetDateTime::now_utc().unix_timestamp(),
     })
@@ -480,6 +481,7 @@ fn normalize_cli_usage(
         plan_type: snapshot.plan_type.or(account_plan_type),
         primary,
         secondary,
+        tertiary: None,
         credits,
         updated_at: OffsetDateTime::now_utc().unix_timestamp(),
     })

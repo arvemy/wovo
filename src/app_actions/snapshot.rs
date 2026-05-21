@@ -11,6 +11,8 @@ use wasm_bindgen::JsValue;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SnapshotActions {
+    pub(crate) cached_snapshot_command: &'static str,
+    pub(crate) refresh_snapshot_command: &'static str,
     pub(crate) accounts: ReadSignal<Vec<AccountSummary>>,
     pub(crate) set_accounts: WriteSignal<Vec<AccountSummary>>,
     pub(crate) set_usage_by_id: WriteSignal<HashMap<String, UsageSnapshot>>,
@@ -92,7 +94,7 @@ impl SnapshotActions {
                     .collect(),
             );
 
-            let result = refresh_snapshot(force).await;
+            let result = refresh_snapshot(actions.refresh_snapshot_command, force).await;
             if !actions.snapshot_epoch.is_current(ticket) {
                 return;
             }
@@ -112,7 +114,7 @@ impl SnapshotActions {
         let actions = *self;
         spawn_local(async move {
             let result = invoke_tauri::<Option<CodexOverviewSnapshot>>(
-                "get_cached_codex_snapshot",
+                actions.cached_snapshot_command,
                 JsValue::UNDEFINED,
             )
             .await;

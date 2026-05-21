@@ -1,3 +1,5 @@
+use crate::claude::login_runner::ClaudeLoginRunnerState;
+use crate::claude::snapshot::{start_claude_snapshot_tasks, ClaudeSnapshotCoordinator};
 use crate::codex::login_runner::LoginRunnerState;
 use crate::codex::settings;
 use crate::snapshot::{
@@ -16,6 +18,7 @@ const WOVO_DARK_WINDOW_ICON: &[u8] = include_bytes!("../icons/wovo-window-dark.p
 
 pub(crate) fn run() {
     let snapshot_coordinator = Arc::new(CodexSnapshotCoordinator::default());
+    let claude_snapshot_coordinator = Arc::new(ClaudeSnapshotCoordinator::default());
     let snapshot_task_token = CancellationToken::new();
     let setup_snapshot_task_token = snapshot_task_token.clone();
     let snapshot_task_supervisor = Arc::new(Mutex::new(None::<SnapshotTaskSupervisor>));
@@ -32,9 +35,11 @@ pub(crate) fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(LoginRunnerState::default())
+        .manage(ClaudeLoginRunnerState::default())
         .manage(crate::app_updates::PendingAppUpdate::default())
         .manage(crate::notifications::NotificationDiagnosticsState::default())
         .manage(snapshot_coordinator.clone())
+        .manage(claude_snapshot_coordinator.clone())
         .setup(move |app| {
             configure_window_icon(app);
             sync_autostart_state(app.handle());
@@ -43,11 +48,16 @@ pub(crate) fn run() {
                     let _ = window.hide();
                 }
             }
-            let supervisor = start_codex_snapshot_tasks(
+            let mut supervisor = start_codex_snapshot_tasks(
                 app.handle().clone(),
                 snapshot_coordinator.clone(),
                 setup_snapshot_task_token.clone(),
             );
+            supervisor.add_handles(start_claude_snapshot_tasks(
+                app.handle().clone(),
+                claude_snapshot_coordinator.clone(),
+                setup_snapshot_task_token.clone(),
+            ));
             if let Ok(mut slot) = setup_snapshot_task_supervisor.lock() {
                 *slot = Some(supervisor);
             }
@@ -55,18 +65,33 @@ pub(crate) fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             crate::account_commands::add_codex_account,
+            crate::claude::account_commands::add_claude_account,
             crate::app_updates::check_app_update,
             crate::app_updates::install_app_update,
             crate::account_commands::cancel_codex_account_login,
+            crate::claude::account_commands::cancel_claude_account_login,
+            crate::claude::snapshot::get_cached_claude_snapshot,
             crate::snapshot::get_cached_codex_snapshot,
+            crate::settings_commands::get_claude_settings,
             crate::settings_commands::get_codex_settings,
             crate::settings_commands::get_codex_notification_status,
+            crate::claude::account_commands::get_detected_claude_account,
             crate::account_commands::get_detected_codex_account,
+            crate::claude::account_commands::list_claude_accounts,
             crate::account_commands::list_codex_accounts,
+            crate::claude::account_commands::reauthenticate_claude_account,
             crate::account_commands::reauthenticate_codex_account,
+            crate::claude::account_commands::remove_claude_account,
             crate::account_commands::remove_codex_account,
+            crate::claude::snapshot::refresh_claude_snapshot,
             crate::snapshot::refresh_codex_snapshot,
+            crate::claude::account_commands::set_system_claude_account,
             crate::account_commands::set_system_codex_account,
+            crate::settings_commands::set_claude_auto_account_switching_enabled,
+            crate::settings_commands::set_claude_cost_usage_enabled,
+            crate::settings_commands::set_claude_hide_account_credentials,
+            crate::settings_commands::set_claude_notifications_enabled,
+            crate::settings_commands::set_claude_usage_source_mode,
             crate::settings_commands::set_codex_auto_account_switching_enabled,
             crate::settings_commands::set_codex_cost_usage_enabled,
             crate::settings_commands::set_codex_hide_account_credentials,
@@ -75,6 +100,8 @@ pub(crate) fn run() {
             crate::settings_commands::set_codex_launch_on_login,
             crate::settings_commands::send_codex_test_notification,
             crate::settings_commands::open_notification_settings,
+            crate::claude::usage_commands::refresh_claude_usage,
+            crate::claude::usage_commands::refresh_all_claude_usage,
             crate::usage_commands::refresh_codex_usage,
             crate::usage_commands::refresh_all_usage
         ]);

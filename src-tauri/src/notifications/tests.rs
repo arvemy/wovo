@@ -21,14 +21,14 @@ fn credential_hiding_redacts_system_notification_text() {
         target_account_label: "other@example.com".to_string(),
         window_label: "5h limit".to_string(),
         threshold_percent: 90.0,
-        target_primary_remaining: 40.0,
+        target_primary_remaining: Some(40.0),
         target_weekly_remaining: 75.0,
     };
 
-    let visible_quota = quota_event_notification(&event, false);
-    let hidden_quota = quota_event_notification(&event, true);
-    let visible_switch = auto_switch_notification(&switch, false);
-    let hidden_switch = auto_switch_notification(&switch, true);
+    let visible_quota = quota_event_notification("Codex", &event, false);
+    let hidden_quota = quota_event_notification("Codex", &event, true);
+    let visible_switch = auto_switch_notification("Codex", &switch, false);
+    let hidden_switch = auto_switch_notification("Codex", &switch, true);
 
     assert!(visible_quota.body.contains("user@example.com"));
     assert!(!hidden_quota.body.contains("user@example.com"));
@@ -42,6 +42,25 @@ fn credential_hiding_redacts_system_notification_text() {
     assert!(hidden_switch.body.contains("another Codex account"));
     assert!(hidden_switch.body.contains("90% auto-switch threshold"));
     assert!(!hidden_switch.body.contains("was exhausted"));
+}
+
+#[test]
+fn auto_switch_notification_omits_primary_remaining_when_absent() {
+    let switch = AutoSwitchNotification {
+        current_account_label: "user@example.com".to_string(),
+        target_account_label: "other@example.com".to_string(),
+        window_label: "Weekly limit".to_string(),
+        threshold_percent: 100.0,
+        target_primary_remaining: None,
+        target_weekly_remaining: 55.0,
+    };
+
+    let visible_switch = auto_switch_notification("Claude", &switch, false);
+
+    assert!(visible_switch
+        .body
+        .contains("Target account: 55% weekly remaining."));
+    assert!(!visible_switch.body.contains("5h"));
 }
 
 #[test]

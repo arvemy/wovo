@@ -1,3 +1,4 @@
+use crate::claude::settings::{self as claude_settings, ClaudeSettings, ClaudeUsageSourceMode};
 use crate::codex::settings::{self, CodexSettings, CodexUsageSourceMode};
 use crate::error::AppError;
 use crate::notifications::{NotificationSettingsOpenResult, NotificationStatus};
@@ -10,12 +11,27 @@ pub(crate) fn get_codex_settings() -> Result<CodexSettings, AppError> {
 }
 
 #[tauri::command]
+pub(crate) fn get_claude_settings() -> Result<ClaudeSettings, AppError> {
+    claude_settings::load_settings()
+}
+
+#[tauri::command]
 pub(crate) fn set_codex_usage_source_mode(
     app: AppHandle,
     usage_source_mode: CodexUsageSourceMode,
 ) -> Result<CodexSettings, AppError> {
     let settings = settings::save_usage_source_mode(usage_source_mode)?;
     crate::tray::publish_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_claude_usage_source_mode(
+    app: AppHandle,
+    usage_source_mode: ClaudeUsageSourceMode,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_usage_source_mode(usage_source_mode)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
     Ok(settings)
 }
 
@@ -30,12 +46,32 @@ pub(crate) fn set_codex_cost_usage_enabled(
 }
 
 #[tauri::command]
+pub(crate) fn set_claude_cost_usage_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_cost_usage_enabled(enabled)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
 pub(crate) fn set_codex_notifications_enabled(
     app: AppHandle,
     enabled: bool,
 ) -> Result<CodexSettings, AppError> {
     let settings = settings::save_notifications_enabled(enabled)?;
     crate::tray::publish_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_claude_notifications_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_notifications_enabled(enabled)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
     Ok(settings)
 }
 
@@ -73,12 +109,32 @@ pub(crate) fn set_codex_auto_account_switching_enabled(
 }
 
 #[tauri::command]
+pub(crate) fn set_claude_auto_account_switching_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_auto_account_switching_enabled(enabled)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
 pub(crate) fn set_codex_hide_account_credentials(
     app: AppHandle,
     enabled: bool,
 ) -> Result<CodexSettings, AppError> {
     let settings = settings::save_hide_account_credentials(enabled)?;
     crate::tray::publish_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_claude_hide_account_credentials(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_hide_account_credentials(enabled)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
     Ok(settings)
 }
 
