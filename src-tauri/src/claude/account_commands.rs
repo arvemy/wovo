@@ -3,8 +3,9 @@ use crate::claude::account_store::{
 };
 use crate::claude::auth_store::{
     credentials_file_lacks_claude_oauth_payload, detected_ambient_account,
-    load_ambient_credentials, load_credentials_from_home, replace_credentials_from_home,
-    save_credentials, system_claude_home_path, ClaudeOAuthCredentials,
+    load_account_profile_from_home, load_ambient_credentials, load_credentials_from_home,
+    replace_credentials_and_profile_from_home, replace_credentials_from_home, save_credentials,
+    system_claude_home_path, ClaudeOAuthCredentials,
 };
 use crate::claude::login_runner::{self, ClaudeLoginRunnerState};
 use crate::claude::token_refresh;
@@ -69,12 +70,15 @@ fn summaries_for_claude_accounts_with_system_home(
 
     if let Some(credentials) = ambient {
         if live_id.is_none() {
+            let profile = load_account_profile_from_home(&credentials.home_path);
             summaries.push(AccountSummary::ambient(
                 credentials.home_path.to_string_lossy().to_string(),
-                None,
+                profile.as_ref().and_then(|profile| profile.email.clone()),
                 credentials.provider_account_id(),
                 None,
-                credentials.plan_type(),
+                profile
+                    .and_then(|profile| profile.organization)
+                    .or_else(|| credentials.plan_type()),
             ));
         }
     }
@@ -194,7 +198,7 @@ pub(crate) fn set_system_claude_account_in_store(
     }
 
     preserve_system_account_before_overwrite(store, system_home)?;
-    replace_credentials_from_home(&target_home, system_home)?;
+    replace_credentials_and_profile_from_home(&target_home, system_home)?;
     Ok(account.summary_with_status(true))
 }
 
@@ -229,7 +233,11 @@ async fn authenticate_managed_account(
         let (email, organization, plan) = usage_fetcher::fetch_cli_identity(&home_path)
             .await
             .unwrap_or((None, None, None));
-        let account_label = organization.or(plan);
+        let profile = load_account_profile_from_home(&home_path);
+        let email = email.or_else(|| profile.as_ref().and_then(|profile| profile.email.clone()));
+        let account_label = organization
+            .or_else(|| profile.and_then(|profile| profile.organization))
+            .or(plan);
         let provider_account_id = credentials.provider_account_id();
         let live_import = if existing_account_id.is_none() {
             import_ambient_claude_account_if_available(&store)?
@@ -296,7 +304,7 @@ fn upsert_authenticated_account_and_mirror_system_if_needed(
             None,
             organization,
             home_path.clone(),
-            |_| replace_credentials_from_home(&home_path, mirror_home_path),
+            |_| replace_credentials_and_profile_from_home(&home_path, mirror_home_path),
         )
     } else {
         store.upsert_authenticated_account(
@@ -413,12 +421,14 @@ fn ensure_live_claude_account_imported(
         if canonical_or_original(&credentials.home_path)? != canonical_or_original(&home_path)? {
             replace_credentials_from_home(&credentials.home_path, &home_path)?;
         }
+        let (email, account_label) =
+            metadata_for_existing_live_import(&existing, &home_path, credentials);
         let (record, replaced_home_paths) = store.upsert_authenticated_account(
             existing.id,
-            None,
+            email,
             Some(provider_account_id),
             None,
-            credentials.plan_type(),
+            account_label,
             home_path,
         )?;
         remove_replaced_homes(store, replaced_home_paths);
@@ -431,13 +441,18 @@ fn ensure_live_claude_account_imported(
     let preferred_id = Uuid::new_v4();
     let home_path = store.create_home(preferred_id)?;
     let result = (|| {
-        replace_credentials_from_home(&credentials.home_path, &home_path)?;
+        replace_credentials_and_profile_from_home(&credentials.home_path, &home_path)?;
+        let profile = load_account_profile_from_home(&credentials.home_path);
+        let email = profile.as_ref().and_then(|profile| profile.email.clone());
+        let account_label = profile
+            .and_then(|profile| profile.organization)
+            .or_else(|| credentials.plan_type());
         let (record, replaced_home_paths) = store.upsert_authenticated_account(
             preferred_id,
-            None,
+            email,
             Some(provider_account_id),
             None,
-            credentials.plan_type(),
+            account_label,
             home_path.clone(),
         )?;
         remove_replaced_homes(store, replaced_home_paths);
@@ -454,6 +469,61 @@ fn ensure_live_claude_account_imported(
             Err(error)
         }
     }
+}
+
+fn metadata_for_existing_live_import(
+    existing: &ManagedClaudeAccountRecord,
+    home_path: &Path,
+    credentials: &ClaudeOAuthCredentials,
+) -> (Option<String>, Option<String>) {
+    if let Some(profile) = load_account_profile_from_home(home_path) {
+        return (profile.email, profile.organization);
+    }
+
+    let plan_label = credentials.plan_type();
+    let label_matches_plan = plan_label
+        .as_deref()
+        .zip(existing.workspace_label.as_deref())
+        .map(|(plan_label, existing_label)| existing_label == plan_label)
+        .unwrap_or(false);
+
+    // A source .claude.json is not tied to the copied OAuth token. Only trust
+    // profile metadata from the managed home, and otherwise repair at most the
+    // token-derived plan label.
+    let account_label = if existing.workspace_label.is_none()
+        || label_matches_plan
+        || existing_has_token_derived_plan_label(existing)
+    {
+        plan_label
+    } else {
+        None
+    };
+
+    (None, account_label)
+}
+
+fn existing_has_token_derived_plan_label(existing: &ManagedClaudeAccountRecord) -> bool {
+    existing.email.is_none()
+        && existing.workspace_account_id.is_none()
+        && existing
+            .workspace_label
+            .as_deref()
+            .is_some_and(is_claude_plan_label)
+}
+
+fn is_claude_plan_label(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "pro"
+            | "max"
+            | "team"
+            | "enterprise"
+            | "claude pro"
+            | "claude max"
+            | "claude team"
+            | "claude enterprise"
+    )
 }
 
 fn canonical_or_original(path: &Path) -> Result<PathBuf, AppError> {
@@ -601,16 +671,40 @@ mod tests {
     }
 
     fn write_claude_credentials(home: &Path, access_token: &str, refresh_token: &str) {
+        write_claude_credentials_with_subscription(home, access_token, refresh_token, "max");
+    }
+
+    fn write_claude_credentials_with_subscription(
+        home: &Path,
+        access_token: &str,
+        refresh_token: &str,
+        subscription_type: &str,
+    ) {
         fs::create_dir_all(home).unwrap();
         let contents = serde_json::json!({
             "claudeAiOauth": {
                 "accessToken": access_token,
                 "refreshToken": refresh_token,
-                "subscriptionType": "max"
+                "subscriptionType": subscription_type
             }
         });
         fs::write(
             home.join(".credentials.json"),
+            serde_json::to_vec_pretty(&contents).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_claude_profile(home: &Path, email: &str, organization: &str) {
+        fs::create_dir_all(home).unwrap();
+        let contents = serde_json::json!({
+            "oauthAccount": {
+                "emailAddress": email,
+                "organizationName": organization
+            }
+        });
+        fs::write(
+            home.join(".claude.json"),
             serde_json::to_vec_pretty(&contents).unwrap(),
         )
         .unwrap();
@@ -621,13 +715,22 @@ mod tests {
         access_token: &str,
         refresh_token: &str,
     ) -> ClaudeOAuthCredentials {
+        claude_credentials_with_subscription(home_path, access_token, refresh_token, "max")
+    }
+
+    fn claude_credentials_with_subscription(
+        home_path: PathBuf,
+        access_token: &str,
+        refresh_token: &str,
+        subscription_type: &str,
+    ) -> ClaudeOAuthCredentials {
         ClaudeOAuthCredentials {
             access_token: access_token.to_string(),
             refresh_token: Some(refresh_token.to_string()),
             expires_at: None,
             scopes: Vec::new(),
             rate_limit_tier: None,
-            subscription_type: Some("max".to_string()),
+            subscription_type: Some(subscription_type.to_string()),
             client_id: None,
             home_path,
         }
@@ -780,6 +883,362 @@ mod tests {
 
         let _ = fs::remove_dir_all(store_root);
         let _ = fs::remove_dir_all(source_home);
+    }
+
+    #[test]
+    fn live_claude_import_uses_profile_email_for_label() {
+        let (store, store_root) = temp_store("live-import-profile-store");
+        let source_home = temp_root("live-import-profile-source");
+        write_claude_credentials(&source_home, "access", "refresh");
+        write_claude_profile(
+            &source_home,
+            "USER@Example.com",
+            "Example Claude Organization",
+        );
+        let credentials = claude_credentials(source_home.clone(), "access", "refresh");
+
+        let imported = ensure_live_claude_account_imported(&store, &credentials)
+            .unwrap()
+            .unwrap();
+        let summary = imported.record.summary_with_status(true);
+        let managed_profile =
+            load_account_profile_from_home(&PathBuf::from(&imported.record.home_path)).unwrap();
+
+        assert_eq!(imported.record.email.as_deref(), Some("user@example.com"));
+        assert_eq!(summary.label, "user@example.com");
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("Example Claude Organization")
+        );
+        assert_eq!(managed_profile.email.as_deref(), Some("user@example.com"));
+        assert_eq!(
+            managed_profile.organization.as_deref(),
+            Some("Example Claude Organization")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(source_home);
+    }
+
+    #[test]
+    fn set_system_claude_account_replaces_stale_system_profile() {
+        let (store, store_root) = temp_store("set-system-profile-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "new-access", "new-refresh");
+        write_claude_profile(&managed_home, "new@example.com", "New Organization");
+        let credentials = claude_credentials(managed_home.clone(), "new-access", "new-refresh");
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                Some("new@example.com".to_string()),
+                credentials.provider_account_id(),
+                None,
+                Some("New Organization".to_string()),
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("set-system-profile-system");
+        write_claude_profile(&system_home, "old@example.com", "Old Organization");
+
+        set_system_claude_account_in_store(&store, &managed_id.to_string(), &system_home).unwrap();
+
+        let system_credentials = load_credentials_from_home(&system_home).unwrap();
+        let system_profile = load_account_profile_from_home(&system_home).unwrap();
+        assert_eq!(
+            system_credentials.refresh_token.as_deref(),
+            Some("new-refresh")
+        );
+        assert_eq!(system_profile.email.as_deref(), Some("new@example.com"));
+        assert_eq!(
+            system_profile.organization.as_deref(),
+            Some("New Organization")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn set_system_claude_account_clears_stale_system_profile_when_target_has_none() {
+        let (store, store_root) = temp_store("set-system-clear-profile-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "new-access", "new-refresh");
+        let credentials = claude_credentials(managed_home.clone(), "new-access", "new-refresh");
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                None,
+                credentials.provider_account_id(),
+                None,
+                Some("Claude Max".to_string()),
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("set-system-clear-profile-system");
+        write_claude_profile(&system_home, "old@example.com", "Old Organization");
+
+        set_system_claude_account_in_store(&store, &managed_id.to_string(), &system_home).unwrap();
+
+        let system_credentials = load_credentials_from_home(&system_home).unwrap();
+        assert_eq!(
+            system_credentials.refresh_token.as_deref(),
+            Some("new-refresh")
+        );
+        assert!(load_account_profile_from_home(&system_home).is_none());
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn live_claude_import_uses_managed_profile_for_existing_account() {
+        let (store, store_root) = temp_store("live-import-existing-profile-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "access", "refresh");
+        write_claude_profile(&managed_home, "new@example.com", "New Organization");
+        let credentials = claude_credentials(managed_home.clone(), "access", "refresh");
+        let provider_account_id = credentials.provider_account_id();
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                Some("new@example.com".to_string()),
+                provider_account_id,
+                None,
+                Some("New Organization".to_string()),
+                managed_home.clone(),
+            )
+            .unwrap();
+
+        let system_home = temp_root("live-import-existing-stale-system");
+        write_claude_credentials(&system_home, "access", "refresh");
+        write_claude_profile(&system_home, "old@example.com", "Old Organization");
+        let system_credentials = claude_credentials(system_home.clone(), "access", "refresh");
+
+        let imported = ensure_live_claude_account_imported(&store, &system_credentials)
+            .unwrap()
+            .unwrap();
+
+        assert!(!imported.created);
+        assert_eq!(imported.record.id, managed_id);
+        assert_eq!(imported.record.email.as_deref(), Some("new@example.com"));
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("New Organization")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn live_claude_import_ignores_unverified_source_profile_for_existing_import() {
+        let (store, store_root) = temp_store("live-import-existing-source-profile-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "access", "refresh");
+        let credentials = claude_credentials(managed_home.clone(), "access", "refresh");
+        let provider_account_id = credentials.provider_account_id();
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                None,
+                provider_account_id,
+                None,
+                None,
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("live-import-existing-source-profile-system");
+        write_claude_credentials(&system_home, "access", "refresh");
+        write_claude_profile(
+            &system_home,
+            "USER@Example.com",
+            "Example Claude Organization",
+        );
+        let system_credentials = claude_credentials(system_home.clone(), "access", "refresh");
+
+        let imported = ensure_live_claude_account_imported(&store, &system_credentials)
+            .unwrap()
+            .unwrap();
+
+        assert!(!imported.created);
+        assert_eq!(imported.record.id, managed_id);
+        assert_eq!(imported.record.email, None);
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("Claude Max")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn live_claude_import_keeps_plan_label_when_source_profile_is_unverified() {
+        let (store, store_root) = temp_store("live-import-existing-plan-profile-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "access", "refresh");
+        let credentials = claude_credentials(managed_home.clone(), "access", "refresh");
+        let provider_account_id = credentials.provider_account_id();
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                None,
+                provider_account_id,
+                None,
+                Some("Claude Max".to_string()),
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("live-import-existing-plan-profile-system");
+        write_claude_credentials(&system_home, "access", "refresh");
+        write_claude_profile(&system_home, "plan@example.com", "Plan Organization");
+        let system_credentials = claude_credentials(system_home.clone(), "access", "refresh");
+
+        let imported = ensure_live_claude_account_imported(&store, &system_credentials)
+            .unwrap()
+            .unwrap();
+
+        assert!(!imported.created);
+        assert_eq!(imported.record.id, managed_id);
+        assert_eq!(imported.record.email, None);
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("Claude Max")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn live_claude_import_uses_plan_label_when_existing_import_has_no_profiles() {
+        let (store, store_root) = temp_store("live-import-existing-plan-fallback-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "access", "refresh");
+        let credentials = claude_credentials(managed_home.clone(), "access", "refresh");
+        let provider_account_id = credentials.provider_account_id();
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                None,
+                provider_account_id,
+                None,
+                None,
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("live-import-existing-plan-fallback-system");
+        write_claude_credentials(&system_home, "access", "refresh");
+        let system_credentials = claude_credentials(system_home.clone(), "access", "refresh");
+
+        let imported = ensure_live_claude_account_imported(&store, &system_credentials)
+            .unwrap()
+            .unwrap();
+
+        assert!(!imported.created);
+        assert_eq!(imported.record.id, managed_id);
+        assert_eq!(imported.record.email, None);
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("Claude Max")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn live_claude_import_updates_existing_token_plan_label_when_subscription_changes() {
+        let (store, store_root) = temp_store("live-import-existing-plan-change-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials_with_subscription(&managed_home, "access", "refresh", "pro");
+        let credentials =
+            claude_credentials_with_subscription(managed_home.clone(), "access", "refresh", "pro");
+        let provider_account_id = credentials.provider_account_id();
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                None,
+                provider_account_id,
+                None,
+                Some("Claude Pro".to_string()),
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("live-import-existing-plan-change-system");
+        write_claude_credentials_with_subscription(&system_home, "access", "refresh", "max");
+        let system_credentials =
+            claude_credentials_with_subscription(system_home.clone(), "access", "refresh", "max");
+
+        let imported = ensure_live_claude_account_imported(&store, &system_credentials)
+            .unwrap()
+            .unwrap();
+
+        assert!(!imported.created);
+        assert_eq!(imported.record.id, managed_id);
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("Claude Max")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
+    }
+
+    #[test]
+    fn live_claude_import_preserves_existing_metadata_without_managed_profile() {
+        let (store, store_root) = temp_store("live-import-existing-preserve-store");
+        let managed_id = Uuid::new_v4();
+        let managed_home = store.create_home(managed_id).unwrap();
+        write_claude_credentials(&managed_home, "access", "refresh");
+        let credentials = claude_credentials(managed_home.clone(), "access", "refresh");
+        let provider_account_id = credentials.provider_account_id();
+        store
+            .upsert_authenticated_account(
+                managed_id,
+                Some("current@example.com".to_string()),
+                provider_account_id,
+                None,
+                Some("Current Organization".to_string()),
+                managed_home,
+            )
+            .unwrap();
+
+        let system_home = temp_root("live-import-existing-preserve-system");
+        write_claude_credentials(&system_home, "access", "refresh");
+        write_claude_profile(&system_home, "old@example.com", "Old Organization");
+        let system_credentials = claude_credentials(system_home.clone(), "access", "refresh");
+
+        let imported = ensure_live_claude_account_imported(&store, &system_credentials)
+            .unwrap()
+            .unwrap();
+
+        assert!(!imported.created);
+        assert_eq!(imported.record.id, managed_id);
+        assert_eq!(
+            imported.record.email.as_deref(),
+            Some("current@example.com")
+        );
+        assert_eq!(
+            imported.record.workspace_label.as_deref(),
+            Some("Current Organization")
+        );
+
+        let _ = fs::remove_dir_all(store_root);
+        let _ = fs::remove_dir_all(system_home);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 const CREDENTIALS_FILE_NAME: &str = ".credentials.json";
+const CONFIG_FILE_NAME: &str = ".claude.json";
 
 #[derive(Debug, Clone)]
 pub struct ClaudeOAuthCredentials {
@@ -22,6 +23,12 @@ pub struct ClaudeOAuthCredentials {
     pub subscription_type: Option<String>,
     pub client_id: Option<String>,
     pub home_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeAccountProfile {
+    pub email: Option<String>,
+    pub organization: Option<String>,
 }
 
 impl ClaudeOAuthCredentials {
@@ -55,6 +62,19 @@ impl ClaudeOAuthCredentials {
 struct CredentialsFile {
     #[serde(rename = "claudeAiOauth")]
     claude_ai_oauth: Option<ClaudeOAuthPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeConfigFile {
+    oauth_account: Option<ClaudeConfigOAuthAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeConfigOAuthAccount {
+    email_address: Option<String>,
+    organization_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -91,13 +111,18 @@ pub fn system_claude_home_path() -> PathBuf {
 
 pub fn detected_ambient_account() -> Result<Option<AccountSummary>, AppError> {
     match load_ambient_credentials() {
-        Ok(credentials) => Ok(Some(AccountSummary::ambient(
-            credentials.home_path.to_string_lossy().to_string(),
-            None,
-            credentials.provider_account_id(),
-            None,
-            credentials.plan_type(),
-        ))),
+        Ok(credentials) => {
+            let profile = load_account_profile_from_home(&credentials.home_path);
+            Ok(Some(AccountSummary::ambient(
+                credentials.home_path.to_string_lossy().to_string(),
+                profile.as_ref().and_then(|profile| profile.email.clone()),
+                credentials.provider_account_id(),
+                None,
+                profile
+                    .and_then(|profile| profile.organization)
+                    .or_else(|| credentials.plan_type()),
+            )))
+        }
         Err(AppError::ClaudeAuthNotFound) => Ok(None),
         Err(error) => Err(error),
     }
@@ -118,10 +143,67 @@ pub fn load_credentials_from_home(home_path: &Path) -> Result<ClaudeOAuthCredent
     parse_credentials_json(&contents, home_path.to_path_buf())
 }
 
+pub fn load_account_profile_from_home(home_path: &Path) -> Option<ClaudeAccountProfile> {
+    let contents = fs::read_to_string(home_path.join(CONFIG_FILE_NAME)).ok()?;
+    let decoded: ClaudeConfigFile = serde_json::from_str(&contents).ok()?;
+    let oauth_account = decoded.oauth_account?;
+    let profile = ClaudeAccountProfile {
+        email: oauth_account
+            .email_address
+            .and_then(normalize_optional_email),
+        organization: oauth_account.organization_name.and_then(normalize_optional),
+    };
+
+    (profile.email.is_some() || profile.organization.is_some()).then_some(profile)
+}
+
 pub fn replace_credentials_from_home(
     source_home: &Path,
     target_home: &Path,
 ) -> Result<(), AppError> {
+    let target_credentials = target_home.join(CREDENTIALS_FILE_NAME);
+    let next = replacement_credentials_json(source_home, target_home)?;
+    write_credentials_json(&target_credentials, &next)
+}
+
+pub fn replace_credentials_and_profile_from_home(
+    source_home: &Path,
+    target_home: &Path,
+) -> Result<(), AppError> {
+    replace_credentials_and_profile_from_home_with_writer(
+        source_home,
+        target_home,
+        write_credentials_json,
+    )
+}
+
+fn replace_credentials_and_profile_from_home_with_writer(
+    source_home: &Path,
+    target_home: &Path,
+    write_credentials: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let target_config = target_home.join(CONFIG_FILE_NAME);
+    let target_credentials = target_home.join(CREDENTIALS_FILE_NAME);
+    let next_credentials = replacement_credentials_json(source_home, target_home)?;
+    let original_profile = target_file_state(&target_config)?;
+
+    replace_account_profile_from_home(source_home, target_home)?;
+    if let Err(error) = write_credentials(&target_credentials, &next_credentials) {
+        restore_target_file_state(&target_config, original_profile).map_err(|rollback_error| {
+            AppError::ClaudeAuthWrite(format!(
+                "credentials update failed: {error}; Claude profile rollback failed: {rollback_error}"
+            ))
+        })?;
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn replacement_credentials_json(
+    source_home: &Path,
+    target_home: &Path,
+) -> Result<Vec<u8>, AppError> {
     let source_credentials = source_home.join(CREDENTIALS_FILE_NAME);
     let source_root = read_credentials_json(&source_credentials)?;
     let claude_oauth = claude_oauth_payload(&source_root)?.clone();
@@ -132,7 +214,90 @@ pub fn replace_credentials_from_home(
 
     let next = serde_json::to_string_pretty(&target_root)
         .map_err(|error| AppError::ClaudeAuthDecode(error.to_string()))?;
-    write_credentials_json(&target_credentials, next.as_bytes())
+    Ok(next.into_bytes())
+}
+
+pub fn replace_account_profile_from_home(
+    source_home: &Path,
+    target_home: &Path,
+) -> Result<(), AppError> {
+    let target_config = target_home.join(CONFIG_FILE_NAME);
+    let replacement = replacement_account_profile(source_home, target_home)?;
+    apply_account_profile_replacement(&target_config, replacement)
+}
+
+enum AccountProfileReplacement {
+    Unchanged,
+    RemoveFile,
+    Write(Vec<u8>),
+}
+
+enum TargetFileState {
+    Missing,
+    Present(Vec<u8>),
+}
+
+fn target_file_state(path: &Path) -> Result<TargetFileState, AppError> {
+    match fs::read(path) {
+        Ok(contents) => Ok(TargetFileState::Present(contents)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(TargetFileState::Missing),
+        Err(error) => Err(AppError::ClaudeAuthRead(error.to_string())),
+    }
+}
+
+fn restore_target_file_state(path: &Path, state: TargetFileState) -> Result<(), AppError> {
+    match state {
+        TargetFileState::Missing => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::ClaudeAuthWrite(error.to_string())),
+        },
+        TargetFileState::Present(contents) => write_claude_config_json(path, &contents),
+    }
+}
+
+fn replacement_account_profile(
+    source_home: &Path,
+    target_home: &Path,
+) -> Result<AccountProfileReplacement, AppError> {
+    let source_account = read_claude_config_oauth_account(&source_home.join(CONFIG_FILE_NAME))?;
+    let target_config = target_home.join(CONFIG_FILE_NAME);
+    let target_exists = target_config.exists();
+    if source_account.is_none() && !target_exists {
+        return Ok(AccountProfileReplacement::Unchanged);
+    }
+
+    let mut target_root = read_claude_config_json_or_empty(&target_config)?;
+    let target_object = claude_config_root_object_mut(&mut target_root)?;
+    if let Some(source_account) = source_account {
+        target_object.insert("oauthAccount".to_string(), source_account);
+    } else {
+        target_object.remove("oauthAccount");
+        if target_object.is_empty() {
+            return Ok(AccountProfileReplacement::RemoveFile);
+        }
+    }
+
+    let next = serde_json::to_string_pretty(&target_root)
+        .map_err(|error| AppError::ClaudeAuthDecode(error.to_string()))?;
+    Ok(AccountProfileReplacement::Write(next.into_bytes()))
+}
+
+fn apply_account_profile_replacement(
+    target_config: &Path,
+    replacement: AccountProfileReplacement,
+) -> Result<(), AppError> {
+    match replacement {
+        AccountProfileReplacement::Unchanged => Ok(()),
+        AccountProfileReplacement::RemoveFile => match fs::remove_file(target_config) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::ClaudeAuthWrite(error.to_string())),
+        },
+        AccountProfileReplacement::Write(contents) => {
+            write_claude_config_json(target_config, &contents)
+        }
+    }
 }
 
 pub fn save_credentials(credentials: &ClaudeOAuthCredentials) -> Result<(), AppError> {
@@ -218,6 +383,10 @@ fn normalize_optional(value: String) -> Option<String> {
     }
 }
 
+fn normalize_optional_email(value: String) -> Option<String> {
+    normalize_optional(value).map(|email| email.to_ascii_lowercase())
+}
+
 fn normalize_plan_label(value: String) -> Option<String> {
     let lower = value.trim().to_ascii_lowercase();
     match lower.as_str() {
@@ -236,6 +405,15 @@ fn read_credentials_json(path: &Path) -> Result<Value, AppError> {
 }
 
 fn read_credentials_json_or_empty(path: &Path) -> Result<Value, AppError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map_err(|error| AppError::ClaudeAuthDecode(error.to_string())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Value::Object(Default::default())),
+        Err(error) => Err(AppError::ClaudeAuthRead(error.to_string())),
+    }
+}
+
+fn read_claude_config_json_or_empty(path: &Path) -> Result<Value, AppError> {
     match fs::read_to_string(path) {
         Ok(contents) => serde_json::from_str(&contents)
             .map_err(|error| AppError::ClaudeAuthDecode(error.to_string())),
@@ -264,10 +442,37 @@ fn credentials_root_object_mut(
     }
 }
 
+fn claude_config_root_object(root: &Value) -> Result<&serde_json::Map<String, Value>, AppError> {
+    match root {
+        Value::Object(object) => Ok(object),
+        _ => Err(AppError::ClaudeAuthDecode(
+            "Claude config root must be a JSON object".to_string(),
+        )),
+    }
+}
+
+fn claude_config_root_object_mut(
+    root: &mut Value,
+) -> Result<&mut serde_json::Map<String, Value>, AppError> {
+    match root {
+        Value::Object(object) => Ok(object),
+        _ => Err(AppError::ClaudeAuthDecode(
+            "Claude config root must be a JSON object".to_string(),
+        )),
+    }
+}
+
 fn claude_oauth_payload(root: &Value) -> Result<&Value, AppError> {
     credentials_root_object(root)?
         .get("claudeAiOauth")
         .ok_or(AppError::ClaudeMissingTokens)
+}
+
+fn read_claude_config_oauth_account(path: &Path) -> Result<Option<Value>, AppError> {
+    let root = read_claude_config_json_or_empty(path)?;
+    Ok(claude_config_root_object(&root)?
+        .get("oauthAccount")
+        .cloned())
 }
 
 fn set_claude_oauth_payload(root: &mut Value, payload: Value) -> Result<(), AppError> {
@@ -285,6 +490,24 @@ fn write_credentials_json(path: &Path, contents: &[u8]) -> Result<(), AppError> 
     fs::create_dir_all(parent).map_err(|error| AppError::ClaudeAuthWrite(error.to_string()))?;
 
     let tmp = temporary_file_path(parent, CREDENTIALS_FILE_NAME);
+    write_new_file(&tmp, contents).map_err(|error| AppError::ClaudeAuthWrite(error.to_string()))?;
+    if let Err(error) = apply_secure_file_permissions(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    replace_file(&tmp, path).map_err(|error| AppError::ClaudeAuthWrite(error.to_string()))
+}
+
+fn write_claude_config_json(path: &Path, contents: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent().ok_or_else(|| {
+        AppError::ClaudeAuthWrite(format!(
+            "Claude config path has no parent: {}",
+            path.to_string_lossy()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| AppError::ClaudeAuthWrite(error.to_string()))?;
+
+    let tmp = temporary_file_path(parent, CONFIG_FILE_NAME);
     write_new_file(&tmp, contents).map_err(|error| AppError::ClaudeAuthWrite(error.to_string()))?;
     if let Err(error) = apply_secure_file_permissions(&tmp) {
         let _ = fs::remove_file(&tmp);
@@ -393,6 +616,29 @@ mod tests {
     }
 
     #[test]
+    fn loads_account_profile_from_claude_config() {
+        let home = temp_home("profile");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join(CONFIG_FILE_NAME),
+            r#"{
+                "oauthAccount": {
+                    "emailAddress": "USER@Example.com",
+                    "organizationName": "Example Org"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let profile = load_account_profile_from_home(&home).unwrap();
+
+        assert_eq!(profile.email.as_deref(), Some("user@example.com"));
+        assert_eq!(profile.organization.as_deref(), Some("Example Org"));
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn saves_refreshed_oauth_credentials_without_dropping_metadata() {
         let home = temp_home("save-refreshed");
         fs::create_dir_all(&home).unwrap();
@@ -478,6 +724,148 @@ mod tests {
         assert_eq!(saved["claudeAiOauth"]["accessToken"], "new-access");
         assert_eq!(saved["claudeAiOauth"]["refreshToken"], "new-refresh");
         assert_eq!(saved["claudeAiOauth"]["customOauthField"], "source-oauth");
+
+        let _ = fs::remove_dir_all(source_home);
+        let _ = fs::remove_dir_all(target_home);
+    }
+
+    #[test]
+    fn replace_credentials_and_profile_preserves_credentials_when_profile_copy_fails() {
+        let source_home = temp_home("replace-with-profile-source");
+        let target_home = temp_home("replace-with-profile-target");
+        fs::create_dir_all(&source_home).unwrap();
+        fs::create_dir_all(&target_home).unwrap();
+        fs::write(
+            source_home.join(CREDENTIALS_FILE_NAME),
+            r#"{
+                "claudeAiOauth": {
+                    "accessToken": "new-access",
+                    "refreshToken": "new-refresh"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            source_home.join(CONFIG_FILE_NAME),
+            r#"{
+                "oauthAccount": {
+                    "emailAddress": "new@example.com",
+                    "organizationName": "New Org"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            target_home.join(CREDENTIALS_FILE_NAME),
+            r#"{
+                "claudeAiOauth": {
+                    "accessToken": "old-access",
+                    "refreshToken": "old-refresh"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(target_home.join(CONFIG_FILE_NAME), "{not-json").unwrap();
+
+        let error =
+            replace_credentials_and_profile_from_home(&source_home, &target_home).unwrap_err();
+
+        assert!(matches!(error, AppError::ClaudeAuthDecode(_)));
+        let saved: Value = serde_json::from_str(
+            &fs::read_to_string(target_home.join(CREDENTIALS_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["claudeAiOauth"]["accessToken"], "old-access");
+        assert_eq!(saved["claudeAiOauth"]["refreshToken"], "old-refresh");
+
+        let _ = fs::remove_dir_all(source_home);
+        let _ = fs::remove_dir_all(target_home);
+    }
+
+    #[test]
+    fn replace_credentials_and_profile_restores_profile_when_credentials_write_fails() {
+        let source_home = temp_home("replace-rollback-source");
+        let target_home = temp_home("replace-rollback-target");
+        fs::create_dir_all(&source_home).unwrap();
+        fs::create_dir_all(&target_home).unwrap();
+        fs::write(
+            source_home.join(CREDENTIALS_FILE_NAME),
+            r#"{
+                "claudeAiOauth": {
+                    "accessToken": "new-access",
+                    "refreshToken": "new-refresh"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            source_home.join(CONFIG_FILE_NAME),
+            r#"{
+                "oauthAccount": {
+                    "emailAddress": "new@example.com",
+                    "organizationName": "New Org"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            target_home.join(CREDENTIALS_FILE_NAME),
+            r#"{
+                "claudeAiOauth": {
+                    "accessToken": "old-access",
+                    "refreshToken": "old-refresh"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            target_home.join(CONFIG_FILE_NAME),
+            r#"{
+                "oauthAccount": {
+                    "emailAddress": "old@example.com",
+                    "organizationName": "Old Org"
+                },
+                "theme": "dark"
+            }"#,
+        )
+        .unwrap();
+
+        let error = replace_credentials_and_profile_from_home_with_writer(
+            &source_home,
+            &target_home,
+            |_, _| {
+                let profile = load_account_profile_from_home(&target_home).unwrap();
+                assert_eq!(profile.email.as_deref(), Some("new@example.com"));
+                Err(AppError::ClaudeAuthWrite(
+                    "forced credentials write failure".to_string(),
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::ClaudeAuthWrite(_)));
+        let saved_profile: Value =
+            serde_json::from_str(&fs::read_to_string(target_home.join(CONFIG_FILE_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved_profile["oauthAccount"]["emailAddress"],
+            "old@example.com"
+        );
+        assert_eq!(saved_profile["oauthAccount"]["organizationName"], "Old Org");
+        assert_eq!(saved_profile["theme"], "dark");
+
+        let saved_credentials: Value = serde_json::from_str(
+            &fs::read_to_string(target_home.join(CREDENTIALS_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved_credentials["claudeAiOauth"]["accessToken"],
+            "old-access"
+        );
+        assert_eq!(
+            saved_credentials["claudeAiOauth"]["refreshToken"],
+            "old-refresh"
+        );
 
         let _ = fs::remove_dir_all(source_home);
         let _ = fs::remove_dir_all(target_home);

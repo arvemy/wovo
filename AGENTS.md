@@ -6,7 +6,7 @@ WoVo is a Tauri 2 desktop app with a Leptos/WASM frontend.
 
 - `src/` contains the Leptos app, entry points, API bindings, and frontend state.
 - `src/ui/` contains reusable Rust/UI primitives; export new shared controls from `src/ui/mod.rs`.
-- `src-tauri/` contains the Rust backend, Tauri commands, Codex account/auth logic, domain models, capabilities, and app config.
+- `src-tauri/` contains the Rust backend, Tauri commands, Codex and Claude account/auth logic, domain models, capabilities, and app config.
 - `style/tailwind.css` is the Tailwind source; `styles.css` is generated and loaded by `index.html`.
 - `public/` stores static assets and logos.
 - Root `Cargo.toml` defines the frontend package/workspace; `src-tauri/Cargo.toml` defines the Tauri crate.
@@ -19,12 +19,12 @@ WoVo is a Tauri 2 desktop app with a Leptos/WASM frontend.
 - `pnpm run watch:css` watches Tailwind input while editing UI.
 - `pnpm run tauri:build` creates production Tauri bundles.
 - `cargo fmt --all` formats Rust code.
-- `cargo clippy --workspace --all-targets` checks Rust code.
+- `cargo clippy --workspace --all-targets -- -D warnings` checks Rust code with warnings denied.
 - `cargo test --workspace` runs Rust tests.
 
 ## Rust Style
 
-Use standard `rustfmt` formatting. Prefer small modules grouped by concern: UI state in `src/app.rs` and `src/views/`, domain types in `src-tauri/src/domain/`, Codex integration in `src-tauri/src/codex/`, and shared errors in `src-tauri/src/error.rs`.
+Use standard `rustfmt` formatting. Prefer small modules grouped by concern: UI state in `src/app.rs` and `src/views/`, domain types in `src-tauri/src/domain/`, provider integrations in `src-tauri/src/codex/` and `src-tauri/src/claude/`, and shared errors in `src-tauri/src/error.rs`.
 
 Use `snake_case` for functions/modules and `PascalCase` for types and Leptos components. Payloads crossing the frontend/backend boundary should use `#[serde(rename_all = "camelCase")]`.
 
@@ -57,12 +57,12 @@ Run `pnpm run build:css` after changing Tailwind classes and commit the resultin
 
 ## Security And Configuration
 
-Do not commit local Codex credentials, OAuth tokens, generated app data, or build outputs from `target/`, `dist/`, or `node_modules/`. Review `src-tauri/capabilities/default.json` when adding Tauri commands or permissions.
+Do not commit local Codex or Claude credentials, OAuth tokens, generated app data, or build outputs from `target/`, `dist/`, or `node_modules/`. Review `src-tauri/capabilities/default.json` when adding Tauri commands or permissions.
 
 Release versions must stay aligned across `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, root `Cargo.toml`, and `package.json`. Releases are produced from `v*.*.*` tags and are left as draft GitHub Releases for maintainer review.
 
 ## Commits And PRs
 
-Use short, imperative commit subjects such as `Refine Codex UI controls` or `Add Codex quota notifications`.
+Use short, imperative commit subjects such as `Refine provider UI controls` or `Add Claude quota notifications`.
 
 PRs should include a brief summary, test results, linked issues when relevant, and screenshots or recordings for UI changes. Call out changes that affect stored account data, authentication flow, Tauri permissions, release signing, updater behavior, or generated assets.

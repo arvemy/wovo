@@ -1,5 +1,7 @@
+use crate::claude::account_store::default_wovo_claude_root;
 use crate::error::AppError;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
+use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -109,6 +111,11 @@ fn spawn_login_pty(home_path: Option<&Path>) -> Result<SpawnedPtyChild, AppError
 
     let mut command = CommandBuilder::new("claude");
     command.arg("/login");
+    command.cwd(
+        ensure_cli_workspace_dir()
+            .map_err(|error| AppError::ClaudeLoginFailed(error.to_string()))?
+            .as_os_str(),
+    );
     if let Some(home_path) = home_path {
         command.env("CLAUDE_CONFIG_DIR", home_path);
     }
@@ -223,6 +230,11 @@ fn run_slash_command_pty_blocking(
 
     let mut command = CommandBuilder::new("claude");
     command.arg(slash_command);
+    command.cwd(
+        ensure_cli_workspace_dir()
+            .map_err(|error| AppError::ClaudeUsageFetch(error.to_string()))?
+            .as_os_str(),
+    );
     command.env("CLAUDE_CONFIG_DIR", home_path);
     command.env("TERM", "xterm-256color");
 
@@ -255,6 +267,13 @@ fn run_slash_command_pty_blocking(
                 push_raw_limited(&mut raw, &chunk);
                 let screen = parser.screen().contents();
                 handle_slash_command_prompt(&screen, &mut prompt_state, writer.as_mut());
+                if slash_command_blocked_by_login_setup(slash_command, &screen) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AppError::ClaudeUsageFetch(
+                        "Claude CLI requires interactive login setup".to_string(),
+                    ));
+                }
                 update_slash_command_ready_since(
                     &mut ready_since,
                     slash_command_ready(slash_command, &screen),
@@ -468,6 +487,32 @@ fn status_command_ready(text: &str) -> bool {
         || lower.contains("/status isn't available")
 }
 
+fn slash_command_blocked_by_login_setup(slash_command: &str, text: &str) -> bool {
+    if slash_command != "/usage" {
+        return false;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    lower.contains("select login method")
+        || lower.contains("browser didn't open")
+        || lower.contains("opening browser to sign in")
+        || lower.contains("paste code here if prompted")
+}
+
+fn ensure_cli_workspace_dir() -> std::io::Result<std::path::PathBuf> {
+    let path = default_wovo_claude_root().join("cli-workspace");
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn should_accept_workspace_trust_prompt(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("yes, i trust this folder")
+        && (lower.contains("quick safety check")
+            || lower.contains("project you created")
+            || lower.contains("workspace"))
+}
+
 fn should_select_default_usage_source(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("claude account with subscription")
@@ -490,6 +535,7 @@ fn should_select_default_login_method(text: &str) -> bool {
 #[derive(Default)]
 struct ClaudeLoginPromptState {
     accepted_first_run_prompt: bool,
+    accepted_workspace_trust_prompt: bool,
     selected_default_login_method: bool,
 }
 
@@ -505,6 +551,13 @@ fn handle_login_prompt<W: Write + ?Sized>(
         return;
     }
 
+    if !state.accepted_workspace_trust_prompt && should_accept_workspace_trust_prompt(text) {
+        let _ = writer.write_all(b"\r");
+        let _ = writer.flush();
+        state.accepted_workspace_trust_prompt = true;
+        return;
+    }
+
     if !state.selected_default_login_method && should_select_default_login_method(text) {
         let _ = writer.write_all(b"\r");
         let _ = writer.flush();
@@ -515,6 +568,7 @@ fn handle_login_prompt<W: Write + ?Sized>(
 #[derive(Default)]
 struct SlashCommandPromptState {
     accepted_first_run_prompt: bool,
+    accepted_workspace_trust_prompt: bool,
     selected_default_usage_source: bool,
 }
 
@@ -527,6 +581,13 @@ fn handle_slash_command_prompt<W: Write + ?Sized>(
         let _ = writer.write_all(b"\r");
         let _ = writer.flush();
         state.accepted_first_run_prompt = true;
+        return;
+    }
+
+    if !state.accepted_workspace_trust_prompt && should_accept_workspace_trust_prompt(text) {
+        let _ = writer.write_all(b"\r");
+        let _ = writer.flush();
+        state.accepted_workspace_trust_prompt = true;
         return;
     }
 
@@ -654,6 +715,28 @@ mod tests {
     }
 
     #[test]
+    fn usage_command_login_setup_prompt_is_a_blocking_state() {
+        assert!(slash_command_blocked_by_login_setup(
+            "/usage",
+            r#"
+            Claude Code can be used with your Claude subscription.
+
+            Select login method:
+            > Claude account with subscription
+              Anthropic Console account
+            "#
+        ));
+        assert!(slash_command_blocked_by_login_setup(
+            "/usage",
+            "Browser didn't open? Use the url below to sign in"
+        ));
+        assert!(!slash_command_blocked_by_login_setup(
+            "/status",
+            "Select login method:"
+        ));
+    }
+
+    #[test]
     fn slash_command_ready_timer_resets_on_each_ready_chunk() {
         let first_ready = Instant::now();
         let later_ready = first_ready + Duration::from_millis(500);
@@ -688,6 +771,22 @@ mod tests {
             Choose the theme for your terminal:
             > Dark mode
               Light mode
+            "#
+        ));
+    }
+
+    #[test]
+    fn workspace_trust_prompt_is_auto_accepted() {
+        assert!(should_accept_workspace_trust_prompt(
+            r#"
+            Accessing workspace:
+
+            /home/user/.wovo/claude/cli-workspace
+
+            Quick safety check: Is this a project you created or one you trust?
+
+            > 1. Yes, I trust this folder
+              2. No, exit
             "#
         ));
     }
@@ -748,6 +847,35 @@ mod tests {
     }
 
     #[test]
+    fn login_prompts_accept_workspace_trust_before_login_method() {
+        let mut state = ClaudeLoginPromptState::default();
+        let mut written = Vec::new();
+
+        handle_login_prompt(
+            r#"
+            Quick safety check: Is this a project you created or one you trust?
+            > 1. Yes, I trust this folder
+              2. No, exit
+            "#,
+            &mut state,
+            &mut written,
+        );
+        handle_login_prompt(
+            r#"
+            Select login method:
+            > Claude account with subscription
+              Anthropic Console account
+            "#,
+            &mut state,
+            &mut written,
+        );
+
+        assert_eq!(written, b"\r\r");
+        assert!(state.accepted_workspace_trust_prompt);
+        assert!(state.selected_default_login_method);
+    }
+
+    #[test]
     fn slash_command_prompts_accept_first_run_prompt_before_usage_source() {
         let mut state = SlashCommandPromptState::default();
         let mut written = Vec::new();
@@ -775,6 +903,38 @@ mod tests {
 
         assert_eq!(written, b"\r\r");
         assert!(state.accepted_first_run_prompt);
+        assert!(state.selected_default_usage_source);
+    }
+
+    #[test]
+    fn slash_command_prompts_accept_workspace_trust_before_usage_source() {
+        let mut state = SlashCommandPromptState::default();
+        let mut written = Vec::new();
+
+        handle_slash_command_prompt(
+            r#"
+            Accessing workspace:
+            /home/user/.wovo/claude/cli-workspace
+            Quick safety check: Is this a project you created or one you trust?
+            > 1. Yes, I trust this folder
+              2. No, exit
+            "#,
+            &mut state,
+            &mut written,
+        );
+        handle_slash_command_prompt(
+            r#"
+            How do you want to view usage?
+            > 1. Claude account with subscription - Pro, Max, Team, or Enterprise
+              2. API usage billing
+              3. Third-party platform
+            "#,
+            &mut state,
+            &mut written,
+        );
+
+        assert_eq!(written, b"\r\r");
+        assert!(state.accepted_workspace_trust_prompt);
         assert!(state.selected_default_usage_source);
     }
 }

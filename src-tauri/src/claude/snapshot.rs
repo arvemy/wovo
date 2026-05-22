@@ -118,8 +118,12 @@ impl ClaudeSnapshotCoordinator {
                     if let Some(snapshot) = previous
                         .as_ref()
                         .and_then(|previous| previous.usage_by_account_id.get(&account.id))
+                        .cloned()
                     {
-                        usage_by_account_id.insert(account.id.clone(), snapshot.clone());
+                        usage_by_account_id.insert(account.id.clone(), snapshot);
+                        if cached_usage_suppresses_refresh_error(&error) {
+                            continue;
+                        }
                     }
                     errors_by_account_id.insert(
                         account.id.clone(),
@@ -265,6 +269,16 @@ impl ClaudeSnapshotCoordinator {
     }
 }
 
+fn cached_usage_suppresses_refresh_error(error: &AppError) -> bool {
+    match error {
+        AppError::ClaudeUsageFetch(message) | AppError::ClaudeLoginFailed(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("status 429") || message.contains("rate limit")
+        }
+        _ => false,
+    }
+}
+
 struct CostScanGuard(Arc<AtomicBool>);
 
 impl Drop for CostScanGuard {
@@ -323,4 +337,38 @@ pub(crate) fn start_claude_snapshot_tasks(
     }));
 
     handles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_usage_suppresses_transient_refresh_errors() {
+        assert!(cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeUsageFetch("status 429".to_string())
+        ));
+        assert!(cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeUsageFetch("rate limited".to_string())
+        ));
+    }
+
+    #[test]
+    fn cached_usage_does_not_suppress_auth_or_decode_errors() {
+        assert!(!cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeUsageFetch("Claude CLI requires interactive login setup".to_string())
+        ));
+        assert!(!cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeUsageFetch("Claude CLI command timed out".to_string())
+        ));
+        assert!(!cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeUsageFetch("status 401".to_string())
+        ));
+        assert!(!cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeInvalidUsageResponse
+        ));
+        assert!(!cached_usage_suppresses_refresh_error(
+            &AppError::ClaudeAuthNotFound
+        ));
+    }
 }

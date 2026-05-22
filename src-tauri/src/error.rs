@@ -199,7 +199,14 @@ impl AppError {
             Self::ClaudeTokenRefresh(_) => {
                 Cow::Borrowed("Claude Code sign-in needs attention. Re-authenticate this account.")
             }
-            Self::ClaudeUsageFetch(_) => Cow::Borrowed("Claude usage could not be refreshed."),
+            Self::ClaudeUsageFetch(message) => {
+                let message = message.to_ascii_lowercase();
+                if message.contains("status 429") || message.contains("rate limit") {
+                    Cow::Borrowed("Claude usage refresh is rate limited. Wovo will retry later.")
+                } else {
+                    Cow::Borrowed("Claude usage could not be refreshed.")
+                }
+            }
             Self::ClaudeInvalidUsageResponse => {
                 Cow::Borrowed("Claude usage response was not usable.")
             }
