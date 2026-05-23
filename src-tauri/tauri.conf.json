@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wovo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.wovo.desktop",
   "build": {
     "beforeDevCommand": "node ./scripts/trunk.mjs serve",
@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCRDA2M0U4MDUzQzdEOUMKUldTY2ZUd0Y2R1BRTzBJSjZheE9yME9NeDZuR2NjODNSbzRqeVFhd21oUEFNU0pnMkZBQmZKekkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIyQTc2RTk5RTg0QTlBRjEKUldUeG1rcm9tVzZuc3Focm00dWpVamRYL3ZBTmNIVG9zcHdvaVhzOG5uK0dMa3lHeXYyUnR3Ty8K",
       "endpoints": [
         "https://github.com/arvemy/wovo/releases/latest/download/latest.json"
       ],
