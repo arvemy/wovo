@@ -17,7 +17,9 @@ const notes = execFileSync(
   },
 );
 
-process.stdout.write(extractReleaseSection(notes, currentTag));
+process.stdout.write(
+  extractReleaseSection(notes, currentTag) ?? fallbackReleaseSection(currentTag),
+);
 
 function extractReleaseSection(markdown, tag) {
   const headings = Array.from(markdown.matchAll(/^##\s+.+$/gm));
@@ -27,7 +29,7 @@ function extractReleaseSection(markdown, tag) {
   });
 
   if (!section) {
-    throw new Error(`Release notes for ${tag} were not generated.`);
+    return null;
   }
 
   const nextHeading = headings.find((heading) => heading.index > section.index);
@@ -57,4 +59,65 @@ function currentReleaseTag() {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   }
+}
+
+function fallbackReleaseSection(tag) {
+  const version = tag.replace(/^v/, "");
+  const date = execFileSync("git", ["log", "-1", "--format=%cs", tag], {
+    encoding: "utf8",
+  }).trim();
+  const previousTag = latestPreviousTag(tag);
+  const range = previousTag ? `${previousTag}..${tag}` : tag;
+  const commits = execFileSync(
+    "git",
+    ["log", "--reverse", "--pretty=format:%s", range],
+    {
+      encoding: "utf8",
+    },
+  )
+    .split(/\r?\n/)
+    .map((subject) => subject.trim())
+    .filter(Boolean)
+    .filter((subject) => !/^Bump version to \d+\.\d+\.\d+$/.test(subject));
+  const body =
+    commits.length > 0
+      ? commits.map((subject) => `* ${subject}`).join("\n")
+      : "* No user-facing changes recorded.";
+
+  return `## ${version} (${date})\n\n${body}\n`;
+}
+
+function latestPreviousTag(currentTag) {
+  const semverTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+  const currentVersion = currentTag.match(semverTagPattern)?.[0]?.slice(1);
+  if (!currentVersion) {
+    return null;
+  }
+
+  const tags = execFileSync("git", ["tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"], {
+    encoding: "utf8",
+  })
+    .split(/\r?\n/)
+    .map((tag) => tag.trim())
+    .filter((tag) => tag && tag !== currentTag && semverTagPattern.test(tag));
+
+  return (
+    tags
+      .filter((tag) => compareVersions(tag.slice(1), currentVersion) < 0)
+      .sort((left, right) => compareVersions(right.slice(1), left.slice(1)))[0] ??
+    null
+  );
+}
+
+function compareVersions(left, right) {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+
+  for (let index = 0; index < 3; index += 1) {
+    if (leftParts[index] !== rightParts[index]) {
+      return leftParts[index] - rightParts[index];
+    }
+  }
+
+  return 0;
 }
