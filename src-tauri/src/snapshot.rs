@@ -1,7 +1,7 @@
 use crate::account_commands::{
     list_codex_accounts, managed_account_store, set_system_codex_account_in_store,
 };
-use crate::auto_switch::auto_switch_candidate;
+use crate::auto_switch::{auto_switch_candidate_with_policy, AutoSwitchPolicy};
 use crate::codex::auth_store::system_codex_home_path;
 use crate::codex::settings;
 use crate::codex::snapshot_cache;
@@ -9,7 +9,9 @@ use crate::codex::{cost_usage, quota_events};
 use crate::domain::usage::{AccountIssue, CodexOverviewSnapshot, CostUsageSnapshot};
 use crate::error::AppError;
 use crate::notifications::send_codex_notifications;
-use crate::usage_commands::refresh_codex_usage_with_mode;
+use crate::provider::{ProviderId, ProviderSourceMode};
+use crate::provider_state;
+use crate::usage_commands::refresh_codex_usage_with_diagnostics;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -107,19 +109,36 @@ impl CodexSnapshotCoordinator {
         let mut accounts = list_codex_accounts(app.clone()).await?;
         let mut usage_by_account_id = HashMap::new();
         let mut errors_by_account_id = HashMap::new();
+        let mut diagnostics_by_account_id = HashMap::new();
 
         for account in &accounts {
-            match refresh_codex_usage_with_mode(app, account.id.clone(), mode).await {
-                Ok(snapshot) => {
-                    usage_by_account_id.insert(account.id.clone(), snapshot);
+            match refresh_codex_usage_with_diagnostics(app, account.id.clone(), mode).await {
+                Ok(result) => {
+                    diagnostics_by_account_id.insert(account.id.clone(), result.diagnostics);
+                    usage_by_account_id.insert(account.id.clone(), result.snapshot);
                 }
-                Err(error) => {
-                    if let Some(snapshot) = previous
+                Err((error, diagnostics)) => {
+                    let serving_cached = if let Some(snapshot) = previous
                         .as_ref()
                         .and_then(|previous| previous.usage_by_account_id.get(&account.id))
                     {
-                        usage_by_account_id.insert(account.id.clone(), snapshot.clone());
-                    }
+                        let mut cached = snapshot.clone();
+                        cached.source = "cached".to_string();
+                        cached.source_mode = Some(ProviderSourceMode::Cached);
+                        cached.fetch_attempts = diagnostics.attempts.clone();
+                        usage_by_account_id.insert(account.id.clone(), cached);
+                        true
+                    } else {
+                        false
+                    };
+                    diagnostics_by_account_id.insert(
+                        account.id.clone(),
+                        if serving_cached {
+                            diagnostics.mark_cached("refresh_failed")
+                        } else {
+                            diagnostics
+                        },
+                    );
                     errors_by_account_id.insert(
                         account.id.clone(),
                         AccountIssue::new(
@@ -132,11 +151,45 @@ impl CodexSnapshotCoordinator {
             }
         }
 
+        let auto_switch_candidate = auto_switch_candidate_with_policy(
+            &accounts,
+            &usage_by_account_id,
+            &errors_by_account_id,
+            AutoSwitchPolicy {
+                auto_switch_threshold_percent: settings.auto_switch_threshold_percent,
+                weekly_penalty_threshold_percent: settings.weekly_penalty_threshold_percent,
+            },
+        );
+        if let Some(candidate) = auto_switch_candidate.as_ref() {
+            let preview = format!(
+                "{} limit would switch {} to {} at {:.0}%",
+                candidate.notification.window_label,
+                candidate.notification.current_account_label,
+                candidate.notification.target_account_label,
+                candidate.notification.threshold_percent
+            );
+            diagnostics_by_account_id
+                .entry(candidate.current_account_id.clone())
+                .or_default()
+                .auto_switch_preview = Some(preview.clone());
+            diagnostics_by_account_id
+                .entry(candidate.target_account_id.clone())
+                .or_default()
+                .auto_switch_preview = Some(preview);
+        }
+
         let auto_switch_notification = if settings.auto_account_switching_enabled {
-            match auto_switch_candidate(&accounts, &usage_by_account_id, &errors_by_account_id) {
+            match auto_switch_candidate {
                 Some(candidate) => {
                     let latest_settings = settings::load_settings()?;
-                    if !latest_settings.auto_account_switching_enabled {
+                    let switch_allowed = latest_settings.auto_account_switching_enabled
+                        && provider_state::auto_switch_is_allowed(
+                            ProviderId::Codex,
+                            &candidate.current_account_id,
+                            &candidate.target_account_id,
+                            OffsetDateTime::now_utc().unix_timestamp(),
+                        )?;
+                    if !switch_allowed {
                         None
                     } else {
                         match set_system_codex_account_in_store(
@@ -145,7 +198,29 @@ impl CodexSnapshotCoordinator {
                             &system_codex_home_path(),
                         ) {
                             Ok(_) => {
-                                accounts = list_codex_accounts(app.clone()).await?;
+                                // Sidecar bookkeeping and re-listing run after
+                                // the live account has already changed; failures
+                                // here must not suppress the snapshot/notification
+                                // that tells the user the switch happened.
+                                let now = OffsetDateTime::now_utc().unix_timestamp();
+                                if let Err(error) = provider_state::record_auto_switch(
+                                    ProviderId::Codex,
+                                    candidate.current_account_id.clone(),
+                                    candidate.target_account_id.clone(),
+                                    candidate.window_key.clone(),
+                                    candidate.trigger_reset_at,
+                                    now,
+                                ) {
+                                    eprintln!(
+                                        "Failed to record codex auto-switch in provider state: {error}"
+                                    );
+                                }
+                                match list_codex_accounts(app.clone()).await {
+                                    Ok(refreshed) => accounts = refreshed,
+                                    Err(error) => eprintln!(
+                                        "Failed to re-list codex accounts after auto-switch: {error}"
+                                    ),
+                                }
                                 Some(candidate.notification)
                             }
                             Err(error) => {
@@ -172,6 +247,7 @@ impl CodexSnapshotCoordinator {
             .refresh_cost_usage_if_needed(
                 settings.cost_usage_enabled,
                 refresh_cost_now,
+                settings.cost_usage_range_days,
                 previous
                     .as_ref()
                     .and_then(|snapshot| snapshot.cost_usage.clone()),
@@ -179,17 +255,33 @@ impl CodexSnapshotCoordinator {
             .await;
 
         let generated_at = OffsetDateTime::now_utc().unix_timestamp();
+        let last_successful_at = usage_by_account_id
+            .values()
+            .filter(|usage| usage.source != "cached")
+            .map(|usage| usage.updated_at)
+            .max()
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.last_successful_at)
+            });
         let mut snapshot = CodexOverviewSnapshot {
             accounts,
             usage_by_account_id,
             errors_by_account_id,
+            diagnostics_by_account_id,
+            stale_reason: None,
+            last_successful_at,
+            last_attempt_at: Some(generated_at),
             quota_events: Vec::new(),
             cost_usage,
             cost_error,
             generated_at,
             stale: false,
         };
-        snapshot.quota_events = quota_events::detect_quota_events(previous.as_ref(), &snapshot);
+        let events = quota_events::detect_quota_events(previous.as_ref(), &snapshot);
+        snapshot.quota_events =
+            provider_state::dedupe_quota_events(ProviderId::Codex, events, generated_at)?;
 
         self.store_and_emit(app, snapshot.clone()).await;
         send_codex_notifications(
@@ -207,6 +299,7 @@ impl CodexSnapshotCoordinator {
         &self,
         enabled: bool,
         refresh_now: bool,
+        range_days: u16,
         previous: Option<CostUsageSnapshot>,
     ) -> (Option<CostUsageSnapshot>, Option<String>) {
         if !enabled {
@@ -221,8 +314,12 @@ impl CodexSnapshotCoordinator {
         let due = last_refresh_at
             .map(|timestamp| now.saturating_sub(timestamp) >= COST_USAGE_REFRESH_SECONDS as i64)
             .unwrap_or(true);
+        let range_changed = previous
+            .as_ref()
+            .map(|snapshot| snapshot.range_days != range_days)
+            .unwrap_or(false);
 
-        if !refresh_now && !due {
+        if !refresh_now && !due && !range_changed {
             return (previous, None);
         }
 
@@ -238,7 +335,7 @@ impl CodexSnapshotCoordinator {
             Duration::from_secs(COST_USAGE_SCAN_TIMEOUT_SECONDS),
             tokio::task::spawn_blocking(move || {
                 let _guard = CostScanGuard(scan_running);
-                cost_usage::load_cost_usage_snapshot(source_root, false)
+                cost_usage::load_cost_usage_snapshot_with_range(source_root, false, range_days)
             }),
         )
         .await

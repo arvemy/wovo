@@ -41,6 +41,10 @@ fn now() -> OffsetDateTime {
     OffsetDateTime::parse("2026-04-12T12:00:00Z", &Rfc3339).unwrap()
 }
 
+fn at(timestamp: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(timestamp, &Rfc3339).unwrap()
+}
+
 fn token_total(timestamp: &str, model: &str, input: i64, cached: i64, output: i64) -> Value {
     serde_json::json!({
         "type": "event_msg",
@@ -103,7 +107,8 @@ fn parses_total_token_usage_deltas() {
         ],
     );
 
-    let snapshot = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let snapshot =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(snapshot.today_tokens, 176);
     assert_eq!(snapshot.daily[0].input_tokens, 160);
@@ -126,7 +131,8 @@ fn parses_last_token_usage_rows() {
         ],
     );
 
-    let snapshot = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let snapshot =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(snapshot.today_tokens, 128);
     assert_eq!(snapshot.daily[0].input_tokens, 120);
@@ -153,7 +159,8 @@ fn turn_context_model_wins_over_token_payload_model() {
         ],
     );
 
-    let snapshot = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let snapshot =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
     let expected = codex_cost_usd("gpt-5.4", 100, 20, 10).unwrap();
 
     assert!((snapshot.today_cost_usd.unwrap() - expected).abs() < 0.000001);
@@ -184,7 +191,8 @@ fn scans_archived_flat_session_files() {
         ],
     );
 
-    let snapshot = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let snapshot =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(snapshot.today_tokens, 37);
     let _ = fs::remove_dir_all(root);
@@ -207,7 +215,8 @@ fn unknown_model_keeps_tokens_with_null_cost() {
         )],
     );
 
-    let snapshot = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let snapshot =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(snapshot.today_tokens, 110);
     assert_eq!(snapshot.today_cost_usd, None);
@@ -226,7 +235,14 @@ fn incremental_cache_reuses_previous_totals_after_append() {
         &[token_total("2026-04-12T10:00:00Z", "gpt-5.4", 100, 20, 10)],
     );
 
-    let first = load_cost_usage_snapshot_at(root.clone(), cache.clone(), now(), false).unwrap();
+    let first = load_cost_usage_snapshot_at(
+        root.clone(),
+        cache.clone(),
+        now(),
+        false,
+        DEFAULT_RANGE_DAYS,
+    )
+    .unwrap();
     assert_eq!(first.today_tokens, 110);
 
     fs::write(
@@ -238,7 +254,8 @@ fn incremental_cache_reuses_previous_totals_after_append() {
     )
     .unwrap();
 
-    let second = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let second =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(second.today_tokens, 165);
     let _ = fs::remove_dir_all(root);
@@ -259,11 +276,19 @@ fn incremental_cache_reparses_unterminated_tail_after_append() {
     let split_at = second_line.len() / 2;
 
     fs::write(&path, format!("{first_line}{}", &second_line[..split_at])).unwrap();
-    let first = load_cost_usage_snapshot_at(root.clone(), cache.clone(), now(), false).unwrap();
+    let first = load_cost_usage_snapshot_at(
+        root.clone(),
+        cache.clone(),
+        now(),
+        false,
+        DEFAULT_RANGE_DAYS,
+    )
+    .unwrap();
     assert_eq!(first.today_tokens, 110);
 
     fs::write(&path, format!("{first_line}{second_line}\n")).unwrap();
-    let second = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let second =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(second.today_tokens, 165);
     let _ = fs::remove_dir_all(root);
@@ -296,11 +321,147 @@ fn forked_last_token_usage_rows_are_counted_as_deltas() {
         ],
     );
 
-    let snapshot = load_cost_usage_snapshot_at(root.clone(), cache, now(), false).unwrap();
+    let snapshot =
+        load_cost_usage_snapshot_at(root.clone(), cache, now(), false, DEFAULT_RANGE_DAYS).unwrap();
 
     assert_eq!(snapshot.today_tokens, 1210);
     assert_eq!(snapshot.daily[0].input_tokens, 1100);
     assert_eq!(snapshot.daily[0].cached_input_tokens, 110);
     assert_eq!(snapshot.daily[0].output_tokens, 110);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn expanding_range_rebuilds_cache_for_older_retention_window() {
+    let root = temp_root("range-expansion");
+    let cache = root.join("cache");
+    write_session(
+        &root,
+        "2026-02-15",
+        "old.jsonl",
+        &[token_total("2026-02-15T10:00:00Z", "gpt-5.4", 100, 10, 10)],
+    );
+
+    let first = load_cost_usage_snapshot_at(root.clone(), cache.clone(), now(), false, 30).unwrap();
+    assert_eq!(first.last_30_days_tokens, 0);
+
+    let second = load_cost_usage_snapshot_at(root.clone(), cache, now(), false, 90).unwrap();
+    assert_eq!(second.last_30_days_tokens, 110);
+    assert_eq!(second.range_days, 90);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn buckets_cached_utc_events_with_requested_offset() {
+    let cache = CostUsageCache {
+        version: CACHE_VERSION,
+        last_scan_unix_ms: 0,
+        retention_days: 30,
+        files: BTreeMap::from([(
+            "session.jsonl".to_string(),
+            CostUsageFileUsage {
+                mtime_unix_ms: 0,
+                size: 0,
+                events: vec![CostUsageEvent {
+                    timestamp_unix: at("2026-04-11T23:30:00Z").unix_timestamp(),
+                    model: "gpt-5.4".to_string(),
+                    session_id: Some("session-1".to_string()),
+                    project: None,
+                    input_tokens: 10,
+                    cached_input_tokens: 1,
+                    output_tokens: 2,
+                    cost_usd: Some(0.01),
+                    naive_day_key: None,
+                }],
+                parsed_bytes: Some(0),
+                last_model: None,
+                last_totals: None,
+                session_id: Some("session-1".to_string()),
+                forked_from_id: None,
+            },
+        )]),
+        roots: None,
+    };
+    let offset = UtcOffset::from_hms(2, 0, 0).unwrap();
+    let range = DayRange::new(now(), 30, offset);
+
+    let snapshot = build_snapshot_from_cache(
+        &cache,
+        &range,
+        now(),
+        offset,
+        ScanStatsAccumulator::default(),
+        root_display(),
+    );
+
+    assert!(snapshot
+        .daily
+        .iter()
+        .any(|point| { point.day_key == "2026-04-12" && point.total_tokens == 12 }));
+}
+
+#[test]
+fn naive_prefix_event_stays_on_its_day_under_negative_offset() {
+    // A row without an offset/Z falls back to the day-prefix; encoded as
+    // UTC midnight, a negative-offset rebucket would shift it backward a
+    // day. The naive_day_key anchor must keep it on the prefix day.
+    let cache = CostUsageCache {
+        version: CACHE_VERSION,
+        last_scan_unix_ms: 0,
+        retention_days: 30,
+        files: BTreeMap::from([(
+            "session.jsonl".to_string(),
+            CostUsageFileUsage {
+                mtime_unix_ms: 0,
+                size: 0,
+                events: vec![CostUsageEvent {
+                    timestamp_unix: unix_from_day_key("2026-04-12").unwrap(),
+                    model: "gpt-5.4".to_string(),
+                    session_id: Some("session-naive".to_string()),
+                    project: None,
+                    input_tokens: 10,
+                    cached_input_tokens: 1,
+                    output_tokens: 2,
+                    cost_usd: Some(0.01),
+                    naive_day_key: Some("2026-04-12".to_string()),
+                }],
+                parsed_bytes: Some(0),
+                last_model: None,
+                last_totals: None,
+                session_id: Some("session-naive".to_string()),
+                forked_from_id: None,
+            },
+        )]),
+        roots: None,
+    };
+    let offset = UtcOffset::from_hms(-5, 0, 0).unwrap();
+    let range = DayRange::new(now(), 30, offset);
+
+    let snapshot = build_snapshot_from_cache(
+        &cache,
+        &range,
+        now(),
+        offset,
+        ScanStatsAccumulator::default(),
+        root_display(),
+    );
+
+    assert!(
+        snapshot
+            .daily
+            .iter()
+            .any(|point| point.day_key == "2026-04-12" && point.total_tokens == 12),
+        "prefix-day event should bucket on 2026-04-12 even with a UTC-5 rebucket",
+    );
+    assert!(
+        snapshot
+            .daily
+            .iter()
+            .all(|point| !(point.day_key == "2026-04-11" && point.total_tokens > 0)),
+        "prefix-day event must not leak onto the previous day in a negative offset",
+    );
+}
+
+fn root_display() -> String {
+    "test-root".to_string()
 }

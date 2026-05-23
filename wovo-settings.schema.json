@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wovo.local/schemas/wovo-settings.schema.json",
+  "title": "WoVo local configuration",
+  "type": "object",
+  "$defs": {
+    "providerSourceMode": {
+      "type": "string",
+      "enum": ["auto", "oauth", "cli"]
+    },
+    "providerSettings": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "type": "integer", "minimum": 1 },
+        "usageSourceMode": { "$ref": "#/$defs/providerSourceMode" },
+        "costUsageEnabled": { "type": "boolean" },
+        "notificationsEnabled": { "type": "boolean" },
+        "autoAccountSwitchingEnabled": { "type": "boolean" },
+        "autoSwitchThresholdPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "weeklyPenaltyThresholdPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "costUsageRangeDays": { "type": "integer", "enum": [7, 30, 90] },
+        "hideAccountCredentials": { "type": "boolean" },
+        "launchOnLogin": { "type": "boolean" },
+        "configWarnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "providerState": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "warningDedupe": { "type": "array" },
+        "autoSwitchHistory": { "type": "array" }
+      }
+    }
+  },
+  "properties": {
+    "codexSettings": { "$ref": "#/$defs/providerSettings" },
+    "claudeSettings": { "$ref": "#/$defs/providerSettings" },
+    "codexProviderState": { "$ref": "#/$defs/providerState" },
+    "claudeProviderState": { "$ref": "#/$defs/providerState" }
+  }
+}

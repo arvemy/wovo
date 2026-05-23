@@ -135,6 +135,8 @@ mod tests {
     fn usage(secondary: UsageWindow, tertiary: Option<UsageWindow>) -> UsageSnapshot {
         UsageSnapshot {
             source: "oauth".to_string(),
+            source_mode: None,
+            fetch_attempts: Vec::new(),
             plan_type: Some("Claude Max".to_string()),
             primary: None,
             secondary: Some(secondary),

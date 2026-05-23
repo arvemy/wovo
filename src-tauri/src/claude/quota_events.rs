@@ -153,6 +153,7 @@ fn warning_event(
         window_label: window.label.clone(),
         used_percent,
         threshold_percent: Some(threshold_percent),
+        reset_at: window.reset_at,
         title,
         body,
         generated_at,
@@ -182,6 +183,7 @@ fn reset_event(
         window_label: window.label.clone(),
         used_percent,
         threshold_percent: None,
+        reset_at: window.reset_at,
         title: "Claude Code quota reset".to_string(),
         body: format!(
             "{}: {} dropped to {:.0}% used.",

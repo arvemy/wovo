@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::codex_api::{
-    invoke_tauri, refresh_snapshot, AccountIssue, AccountSummary, CodexOverviewSnapshot,
-    CostUsageSnapshot, QuotaEvent, UsageSnapshot,
+    invoke_tauri, refresh_snapshot, AccountIssue, AccountRefreshDiagnostics, AccountSummary,
+    CodexOverviewSnapshot, CostUsageSnapshot, QuotaEvent, UsageSnapshot,
 };
 use crate::request_epoch::RequestEpoch;
 use leptos::prelude::*;
@@ -17,6 +17,7 @@ pub(crate) struct SnapshotActions {
     pub(crate) set_accounts: WriteSignal<Vec<AccountSummary>>,
     pub(crate) set_usage_by_id: WriteSignal<HashMap<String, UsageSnapshot>>,
     pub(crate) set_errors_by_id: WriteSignal<HashMap<String, AccountIssue>>,
+    pub(crate) set_diagnostics_by_id: WriteSignal<HashMap<String, AccountRefreshDiagnostics>>,
     pub(crate) set_quota_events: WriteSignal<Vec<QuotaEvent>>,
     pub(crate) set_dismissed_quota_event_ids: WriteSignal<HashSet<String>>,
     pub(crate) set_loading_ids: WriteSignal<HashSet<String>>,
@@ -26,6 +27,9 @@ pub(crate) struct SnapshotActions {
     pub(crate) snapshot_generated_at: ReadSignal<Option<i64>>,
     pub(crate) set_snapshot_generated_at: WriteSignal<Option<i64>>,
     pub(crate) set_snapshot_stale: WriteSignal<bool>,
+    pub(crate) set_snapshot_stale_reason: WriteSignal<Option<String>>,
+    pub(crate) set_snapshot_last_successful_at: WriteSignal<Option<i64>>,
+    pub(crate) set_snapshot_last_attempt_at: WriteSignal<Option<i64>>,
     pub(crate) set_is_listing: WriteSignal<bool>,
     pub(crate) set_global_error: WriteSignal<Option<String>>,
     pub(crate) snapshot_epoch: RequestEpoch,
@@ -60,6 +64,8 @@ impl SnapshotActions {
         self.set_accounts.set(snapshot.accounts);
         self.set_usage_by_id.set(snapshot.usage_by_account_id);
         self.set_errors_by_id.set(snapshot.errors_by_account_id);
+        self.set_diagnostics_by_id
+            .set(snapshot.diagnostics_by_account_id);
         self.set_quota_events.set(snapshot.quota_events);
         self.set_dismissed_quota_event_ids.update(|set| {
             set.retain(|id| quota_event_ids.contains(id));
@@ -72,6 +78,11 @@ impl SnapshotActions {
         self.set_snapshot_generated_at
             .set(Some(snapshot.generated_at));
         self.set_snapshot_stale.set(snapshot.stale);
+        self.set_snapshot_stale_reason.set(snapshot.stale_reason);
+        self.set_snapshot_last_successful_at
+            .set(snapshot.last_successful_at);
+        self.set_snapshot_last_attempt_at
+            .set(snapshot.last_attempt_at);
     }
 
     pub(crate) fn finish_listing(&self) {

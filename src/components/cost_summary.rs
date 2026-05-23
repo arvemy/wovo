@@ -8,7 +8,13 @@ use std::collections::BTreeMap;
 
 #[component]
 pub fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
-    let today_key = utc_day_key(usage.updated_at);
+    // Backend buckets `daily` in its configured timezone; use the snapshot's
+    // today_key directly so a non-UTC user near midnight doesn't mismatch.
+    // Older cached snapshots without today_key fall back to UTC.
+    let today_key = usage
+        .today_key
+        .clone()
+        .unwrap_or_else(|| utc_day_key(usage.updated_at));
     let today_detail = usage
         .daily
         .iter()
@@ -17,31 +23,39 @@ pub fn CostSummary(usage: CostUsageSnapshot) -> impl IntoView {
         .unwrap_or_else(CostUsageBreakdown::empty);
     let last_30_days_detail = CostUsageBreakdown::from_daily_points(&usage.daily);
     let daily_for_chart = usage.daily.clone();
+    let chart_today_key = today_key.clone();
+    let range_label = format!("Last {}d", usage.range_days);
 
     view! {
-        <div class="mb-3 flex items-end gap-3 border border-border bg-secondary p-2.5">
-            <div class="grid min-w-0 flex-1 grid-cols-2 gap-3">
-                <CostMetric
-                    label="Today"
-                    tokens=usage.today_tokens
-                    cost=usage.today_cost_usd
-                    detail=today_detail
-                />
-                <CostMetric
-                    label="Last 30 days"
-                    tokens=usage.last_30_days_tokens
-                    cost=usage.last_30_days_cost_usd
-                    detail=last_30_days_detail
+        <div class="mb-3 border border-border bg-secondary p-2.5">
+            <div class="flex items-end gap-3">
+                <div class="grid min-w-0 flex-1 grid-cols-2 gap-3">
+                    <CostMetric
+                        label="Today".to_string()
+                        tokens=usage.today_tokens
+                        cost=usage.today_cost_usd
+                        detail=today_detail
+                    />
+                    <CostMetric
+                        label=range_label
+                        tokens=usage.last_30_days_tokens
+                        cost=usage.last_30_days_cost_usd
+                        detail=last_30_days_detail
+                    />
+                </div>
+                <UsageChartButton
+                    daily=daily_for_chart
+                    updated_at=usage.updated_at
+                    today_key=chart_today_key
                 />
             </div>
-            <UsageChartButton daily=daily_for_chart updated_at=usage.updated_at/>
         </div>
     }
 }
 
 #[component]
 fn CostMetric(
-    label: &'static str,
+    label: String,
     tokens: i64,
     cost: Option<f64>,
     detail: CostUsageBreakdown,
@@ -54,10 +68,11 @@ fn CostMetric(
     let output_detail = format!("{} output", format_tokens(detail.output_tokens));
     let total_detail = format!("{} total", format_tokens(detail.total_tokens));
     let tooltip_label = format!("{label} pricing details");
+    let display_label = label;
 
     view! {
         <div class="flex min-w-0 items-center gap-2 whitespace-nowrap">
-            <p class="shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+            <p class="shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{display_label}</p>
             <div class="flex min-w-0 items-baseline gap-2">
                 <strong class="shrink-0 text-sm font-semibold leading-none">{format_cost(cost)}</strong>
                 <span class="min-w-0 truncate text-xs text-muted-foreground">{format_tokens(tokens)}</span>
@@ -88,8 +103,12 @@ fn CostMetric(
 }
 
 #[component]
-fn UsageChartButton(daily: Vec<CostUsageDailyPoint>, updated_at: i64) -> impl IntoView {
-    let months = chart_months(daily, updated_at);
+fn UsageChartButton(
+    daily: Vec<CostUsageDailyPoint>,
+    updated_at: i64,
+    today_key: String,
+) -> impl IntoView {
+    let months = chart_months(daily, updated_at, &today_key);
     let month_count = months.len();
     if month_count == 0 {
         return view! {
@@ -106,7 +125,7 @@ fn UsageChartButton(daily: Vec<CostUsageDailyPoint>, updated_at: i64) -> impl In
         }.into_any();
     }
 
-    let today_key = StoredValue::new(utc_day_key(js_sys::Date::now() as i64 / 1000));
+    let today_key = StoredValue::new(today_key);
     let months = StoredValue::new(months);
     let selected_month_index = RwSignal::new(month_count - 1);
     let modal_open = RwSignal::new(false);
@@ -342,6 +361,8 @@ struct ChartDay {
     cached_input_tokens: i64,
     output_tokens: i64,
     total_tokens: i64,
+    cost_usd: Option<f64>,
+    scope_label: Option<String>,
 }
 
 impl ChartDay {
@@ -391,16 +412,27 @@ impl ChartDay {
     }
 
     fn breakdown_label(&self) -> String {
-        format!(
+        let mut label = format!(
             "in {} / cached {} / out {}",
             format_tokens(self.input_tokens.max(0)),
             format_tokens(self.cached_input_tokens.max(0)),
             format_tokens(self.output_tokens.max(0)),
-        )
+        );
+        if let Some(cost) = self.cost_usd {
+            label.push_str(&format!(" / {}", format_cost(Some(cost))));
+        }
+        if let Some(scope) = self.scope_label.as_deref() {
+            label.push_str(&format!(" / {scope}"));
+        }
+        label
     }
 }
 
-fn chart_months(points: Vec<CostUsageDailyPoint>, updated_at: i64) -> Vec<ChartMonth> {
+fn chart_months(
+    points: Vec<CostUsageDailyPoint>,
+    updated_at: i64,
+    today_key: &str,
+) -> Vec<ChartMonth> {
     let mut grouped: BTreeMap<(i32, u32), BTreeMap<u32, CostUsageDailyPoint>> = BTreeMap::new();
     for point in points {
         let Some((year, month, day)) = parse_day_key(&point.day_key) else {
@@ -412,17 +444,31 @@ fn chart_months(points: Vec<CostUsageDailyPoint>, updated_at: i64) -> Vec<ChartM
             .entry(day)
             .or_insert_with(|| CostUsageDailyPoint {
                 day_key: point.day_key.clone(),
+                model: None,
+                session_id: None,
+                project: None,
                 input_tokens: 0,
                 cached_input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
+                cost_usd: None,
             });
         entry.input_tokens += point.input_tokens;
         entry.cached_input_tokens += point.cached_input_tokens;
         entry.output_tokens += point.output_tokens;
         entry.total_tokens += point.total_tokens;
+        if entry.model.is_none() {
+            entry.model.clone_from(&point.model);
+        }
+        if entry.session_id.is_none() {
+            entry.session_id.clone_from(&point.session_id);
+        }
+        if entry.project.is_none() {
+            entry.project.clone_from(&point.project);
+        }
+        entry.cost_usd = merge_cost(entry.cost_usd, point.cost_usd);
     }
-    seed_recent_usage_months(&mut grouped, updated_at);
+    seed_recent_usage_months(&mut grouped, updated_at, today_key);
 
     grouped
         .into_iter()
@@ -440,6 +486,8 @@ fn chart_months(points: Vec<CostUsageDailyPoint>, updated_at: i64) -> Vec<ChartM
                             cached_input_tokens: point.cached_input_tokens,
                             output_tokens: point.output_tokens,
                             total_tokens: point.total_tokens,
+                            cost_usd: point.cost_usd,
+                            scope_label: point_scope_label(point),
                         })
                         .unwrap_or_else(|| ChartDay {
                             day_key: format!("{year:04}-{month:02}-{day:02}"),
@@ -449,6 +497,8 @@ fn chart_months(points: Vec<CostUsageDailyPoint>, updated_at: i64) -> Vec<ChartM
                             cached_input_tokens: 0,
                             output_tokens: 0,
                             total_tokens: 0,
+                            cost_usd: None,
+                            scope_label: None,
                         })
                 })
                 .collect::<Vec<_>>();
@@ -505,9 +555,31 @@ fn chart_months(points: Vec<CostUsageDailyPoint>, updated_at: i64) -> Vec<ChartM
         .collect()
 }
 
+fn merge_cost(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (None, Some(right)) => Some(right),
+        (Some(left), None) => Some(left),
+        (None, None) => None,
+    }
+}
+
+fn point_scope_label(point: &CostUsageDailyPoint) -> Option<String> {
+    [
+        point.model.as_deref(),
+        point.session_id.as_deref(),
+        point.project.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .map(str::to_string)
+}
+
 fn seed_recent_usage_months(
     grouped: &mut BTreeMap<(i32, u32), BTreeMap<u32, CostUsageDailyPoint>>,
     updated_at: i64,
+    today_key: &str,
 ) {
     if updated_at <= 0 {
         return;
@@ -516,14 +588,19 @@ fn seed_recent_usage_months(
     const RECENT_USAGE_DAYS: i64 = 30;
     const SECONDS_PER_DAY: i64 = 86_400;
 
+    // Anchor the trailing bracket on the backend's local today_key so the
+    // modal defaults to a month that contains data. In negative-offset
+    // timezones near a UTC month boundary, utc_day_key(updated_at) lands a
+    // day ahead and would seed an empty trailing month otherwise.
+    if let Some((year, month, _)) = parse_day_key(today_key) {
+        grouped.entry((year, month)).or_default();
+    }
+
     let start_at = updated_at
         .saturating_sub((RECENT_USAGE_DAYS - 1) * SECONDS_PER_DAY)
         .max(0);
-
-    for day_key in [utc_day_key(start_at), utc_day_key(updated_at)] {
-        if let Some((year, month, _)) = parse_day_key(&day_key) {
-            grouped.entry((year, month)).or_default();
-        }
+    if let Some((year, month, _)) = parse_day_key(&utc_day_key(start_at)) {
+        grouped.entry((year, month)).or_default();
     }
 }
 

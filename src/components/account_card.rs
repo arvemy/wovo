@@ -149,6 +149,16 @@ where
     let can_remove_call = move || can_remove.with_value(|f| f());
     let plan_label = move || usage.with_value(|f| f().and_then(|s| s.plan_type));
     let usage_source = move || usage.with_value(|f| f().map(|s| s.source));
+    let usage_source_mode = move || usage.with_value(|f| f().and_then(|s| s.source_mode));
+    let latest_attempt_status = move || {
+        usage.with_value(|f| {
+            f().and_then(|s| {
+                s.fetch_attempts
+                    .last()
+                    .map(|attempt| format!("{} {}", attempt.source_mode.label(), attempt.status))
+            })
+        })
+    };
     let primary = move || usage.with_value(|f| f().and_then(|s| s.primary));
     let secondary = move || usage.with_value(|f| f().and_then(|s| s.secondary));
     let tertiary = move || usage.with_value(|f| f().and_then(|s| s.tertiary));
@@ -204,6 +214,16 @@ where
                     {move || usage_source().map(|source| view! {
                         <Badge variant=BadgeVariant::Muted size=BadgeSize::Sm class="h-5 shrink-0 uppercase tracking-wide">
                             {source}
+                        </Badge>
+                    })}
+                    {move || usage_source_mode().map(|mode| view! {
+                        <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm class="h-5 shrink-0 uppercase tracking-wide">
+                            {mode.label()}
+                        </Badge>
+                    })}
+                    {move || latest_attempt_status().map(|status| view! {
+                        <Badge variant=BadgeVariant::Muted size=BadgeSize::Sm class="h-5 shrink-0 uppercase tracking-wide">
+                            {status}
                         </Badge>
                     })}
                 </div>
@@ -425,6 +445,8 @@ mod tests {
     fn usage(secondary: UsageWindow, tertiary: Option<UsageWindow>) -> UsageSnapshot {
         UsageSnapshot {
             source: "oauth".to_string(),
+            source_mode: None,
+            fetch_attempts: Vec::new(),
             plan_type: None,
             primary: None,
             secondary: Some(secondary),

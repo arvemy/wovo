@@ -2,6 +2,7 @@ use crate::claude::auth_store::ClaudeOAuthCredentials;
 use crate::claude::login_runner;
 use crate::domain::usage::{CreditsSnapshot, UsageSnapshot, UsageWindow};
 use crate::error::AppError;
+use crate::provider::ProviderSourceMode;
 use reqwest::Client;
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -129,6 +130,8 @@ fn normalize_oauth_usage(
     Ok(UsageSnapshot {
         account_id,
         source: "oauth".to_string(),
+        source_mode: Some(ProviderSourceMode::Oauth),
+        fetch_attempts: Vec::new(),
         plan_type,
         primary,
         secondary,
@@ -245,6 +248,8 @@ fn normalize_cli_usage(
     Ok(UsageSnapshot {
         account_id,
         source: "cli".to_string(),
+        source_mode: Some(ProviderSourceMode::Cli),
+        fetch_attempts: Vec::new(),
         plan_type,
         primary,
         secondary,

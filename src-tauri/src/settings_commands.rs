@@ -119,6 +119,66 @@ pub(crate) fn set_claude_auto_account_switching_enabled(
 }
 
 #[tauri::command]
+pub(crate) fn set_codex_auto_switch_threshold_percent(
+    app: AppHandle,
+    threshold: f64,
+) -> Result<CodexSettings, AppError> {
+    let settings = settings::save_auto_switch_threshold_percent(threshold)?;
+    crate::tray::publish_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_claude_auto_switch_threshold_percent(
+    app: AppHandle,
+    threshold: f64,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_auto_switch_threshold_percent(threshold)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_codex_weekly_penalty_threshold_percent(
+    app: AppHandle,
+    threshold: f64,
+) -> Result<CodexSettings, AppError> {
+    let settings = settings::save_weekly_penalty_threshold_percent(threshold)?;
+    crate::tray::publish_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_claude_weekly_penalty_threshold_percent(
+    app: AppHandle,
+    threshold: f64,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_weekly_penalty_threshold_percent(threshold)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_codex_cost_usage_range_days(
+    app: AppHandle,
+    range_days: u16,
+) -> Result<CodexSettings, AppError> {
+    let settings = settings::save_cost_usage_range_days(range_days)?;
+    crate::tray::publish_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub(crate) fn set_claude_cost_usage_range_days(
+    app: AppHandle,
+    range_days: u16,
+) -> Result<ClaudeSettings, AppError> {
+    let settings = claude_settings::save_cost_usage_range_days(range_days)?;
+    crate::tray::publish_claude_settings_update(&app, &settings);
+    Ok(settings)
+}
+
+#[tauri::command]
 pub(crate) fn set_codex_hide_account_credentials(
     app: AppHandle,
     enabled: bool,

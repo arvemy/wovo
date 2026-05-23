@@ -1,9 +1,8 @@
-use super::ACCOUNT_LOCAL_CODEX_ENTRIES;
+use super::ACCOUNT_AUTH_FILE_NAME;
 use crate::error::AppError;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
 #[cfg(windows)]
 pub(super) fn create_symlink(source: &Path, target: &Path) -> Result<(), AppError> {
@@ -65,118 +64,12 @@ pub(super) fn apply_secure_file_permissions(_path: &Path) -> Result<(), AppError
     Ok(())
 }
 
+// Only the canonical auth.json is preserved as account-local under the
+// auth-only model. Earlier revisions also matched auth.*, token, and credential
+// prefixes; that broader matching is intentionally dropped so the migration
+// backs up anything Codex CLI might write alongside the canonical file.
 pub(super) fn is_account_local_entry(name: &str) -> bool {
-    if ACCOUNT_LOCAL_CODEX_ENTRIES.contains(&name) {
-        return true;
-    }
-
-    let lower = name.to_ascii_lowercase();
-    lower.starts_with("auth.") || lower.contains("token") || lower.contains("credential")
-}
-
-pub(super) fn shared_link_points_to(path: &Path, expected_target: &Path) -> Result<bool, AppError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(AppError::AccountStore(error.to_string())),
-    };
-    if !metadata.file_type().is_symlink() {
-        return Ok(false);
-    }
-
-    let link_target =
-        fs::read_link(path).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    let normalized_target = if link_target.is_absolute() {
-        link_target
-    } else {
-        path.parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(link_target)
-    };
-    Ok(canonical_or_original(&normalized_target)? == canonical_or_original(expected_target)?)
-}
-
-pub(super) fn promote_entry_to_shared(
-    source: &Path,
-    target: &Path,
-    backup_root: &Path,
-) -> Result<(), AppError> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    }
-
-    let source_metadata =
-        fs::symlink_metadata(source).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    let target_metadata = match fs::symlink_metadata(target) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == ErrorKind::NotFound => None,
-        Err(error) => return Err(AppError::AccountStore(error.to_string())),
-    };
-
-    match target_metadata {
-        None => move_path(source, target),
-        Some(target_metadata)
-            if source_metadata.is_dir()
-                && !source_metadata.file_type().is_symlink()
-                && target_metadata.is_dir()
-                && !target_metadata.file_type().is_symlink() =>
-        {
-            merge_dir_contents(source, target, &backup_root.join(path_file_name(source)))?;
-            fs::remove_dir_all(source).map_err(|error| AppError::AccountStore(error.to_string()))
-        }
-        Some(target_metadata)
-            if source_metadata.is_file()
-                && target_metadata.is_file()
-                && same_file_contents(source, target)? =>
-        {
-            fs::remove_file(source).map_err(|error| AppError::AccountStore(error.to_string()))
-        }
-        Some(_) => backup_and_remove_path(source, backup_root),
-    }
-}
-
-fn merge_dir_contents(source: &Path, target: &Path, backup_root: &Path) -> Result<(), AppError> {
-    fs::create_dir_all(target).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    for entry in fs::read_dir(source).map_err(|error| AppError::AccountStore(error.to_string()))? {
-        let entry = entry.map_err(|error| AppError::AccountStore(error.to_string()))?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let source_metadata = fs::symlink_metadata(&source_path)
-            .map_err(|error| AppError::AccountStore(error.to_string()))?;
-        let target_metadata = match fs::symlink_metadata(&target_path) {
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == ErrorKind::NotFound => None,
-            Err(error) => return Err(AppError::AccountStore(error.to_string())),
-        };
-
-        match target_metadata {
-            None => move_path(&source_path, &target_path)?,
-            Some(target_metadata)
-                if source_metadata.is_dir()
-                    && !source_metadata.file_type().is_symlink()
-                    && target_metadata.is_dir()
-                    && !target_metadata.file_type().is_symlink() =>
-            {
-                merge_dir_contents(
-                    &source_path,
-                    &target_path,
-                    &backup_root.join(entry.file_name()),
-                )?;
-                fs::remove_dir_all(&source_path)
-                    .map_err(|error| AppError::AccountStore(error.to_string()))?;
-            }
-            Some(target_metadata)
-                if source_metadata.is_file()
-                    && target_metadata.is_file()
-                    && same_file_contents(&source_path, &target_path)? =>
-            {
-                fs::remove_file(&source_path)
-                    .map_err(|error| AppError::AccountStore(error.to_string()))?;
-            }
-            Some(_) => backup_and_remove_path(&source_path, backup_root)?,
-        }
-    }
-    Ok(())
+    name == ACCOUNT_AUTH_FILE_NAME
 }
 
 pub(super) fn copy_account_local_entries(
@@ -197,12 +90,28 @@ pub(super) fn copy_account_local_entries(
         }
         let target = target_home.join(&name);
         remove_path_if_exists(&target)?;
-        copy_path(&entry.path(), &target)?;
-        if name_str == "auth.json" {
-            apply_secure_file_permissions(&target)?;
-        }
+        fs::copy(entry.path(), &target)
+            .map(|_| ())
+            .map_err(|error| AppError::AccountStore(error.to_string()))?;
+        apply_secure_file_permissions(&target)?;
     }
     Ok(())
+}
+
+pub(super) fn materialize_auth_json(path: &Path) -> Result<(), AppError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::AccountStore(error.to_string())),
+    };
+
+    if metadata.file_type().is_symlink() {
+        let contents = fs::read(path).map_err(|error| AppError::AccountStore(error.to_string()))?;
+        remove_symlink_path(path)?;
+        fs::write(path, contents).map_err(|error| AppError::AccountStore(error.to_string()))?;
+    }
+
+    apply_secure_file_permissions(path)
 }
 
 pub(super) fn move_path(source: &Path, target: &Path) -> Result<(), AppError> {
@@ -232,23 +141,6 @@ fn copy_path(source: &Path, target: &Path) -> Result<(), AppError> {
             .map(|_| ())
             .map_err(|error| AppError::AccountStore(error.to_string()))
     }
-}
-
-fn backup_and_remove_path(source: &Path, backup_root: &Path) -> Result<(), AppError> {
-    let backup_path = backup_root.join(format!("{}-{}", path_file_name(source), Uuid::new_v4()));
-    move_path(source, &backup_path)
-}
-
-fn path_file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn same_file_contents(left: &Path, right: &Path) -> Result<bool, AppError> {
-    let left = fs::read(left).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    let right = fs::read(right).map_err(|error| AppError::AccountStore(error.to_string()))?;
-    Ok(left == right)
 }
 
 fn copy_dir_contents(source: &Path, target: &Path) -> Result<(), AppError> {

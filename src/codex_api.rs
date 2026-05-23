@@ -40,6 +40,10 @@ pub(crate) enum AccountSourceKind {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UsageSnapshot {
     pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) source_mode: Option<CodexUsageSourceMode>,
+    #[serde(default)]
+    pub(crate) fetch_attempts: Vec<ProviderFetchAttempt>,
     pub(crate) plan_type: Option<String>,
     pub(crate) primary: Option<UsageWindow>,
     pub(crate) secondary: Option<UsageWindow>,
@@ -76,6 +80,8 @@ pub(crate) struct QuotaEvent {
     pub(crate) window_label: String,
     pub(crate) used_percent: f64,
     pub(crate) threshold_percent: Option<f64>,
+    #[serde(default)]
+    pub(crate) reset_at: Option<i64>,
     pub(crate) title: String,
     pub(crate) body: String,
     pub(crate) generated_at: i64,
@@ -87,6 +93,7 @@ pub(crate) enum CodexUsageSourceMode {
     Auto,
     Oauth,
     Cli,
+    Cached,
 }
 
 impl CodexUsageSourceMode {
@@ -95,6 +102,7 @@ impl CodexUsageSourceMode {
             Self::Auto => "Auto",
             Self::Oauth => "OAuth",
             Self::Cli => "CLI",
+            Self::Cached => "Cached",
         }
     }
 }
@@ -102,13 +110,29 @@ impl CodexUsageSourceMode {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodexSettings {
+    #[serde(default)]
+    pub(crate) schema_version: u16,
     pub(crate) usage_source_mode: CodexUsageSourceMode,
     pub(crate) cost_usage_enabled: bool,
     pub(crate) notifications_enabled: bool,
     pub(crate) auto_account_switching_enabled: bool,
+    #[serde(default = "default_auto_switch_threshold_percent")]
+    pub(crate) auto_switch_threshold_percent: f64,
+    #[serde(default = "default_cost_usage_range_days")]
+    pub(crate) cost_usage_range_days: u16,
     pub(crate) hide_account_credentials: bool,
     #[serde(default)]
     pub(crate) launch_on_login: bool,
+    #[serde(default)]
+    pub(crate) config_warnings: Vec<String>,
+}
+
+fn default_auto_switch_threshold_percent() -> f64 {
+    90.0
+}
+
+fn default_cost_usage_range_days() -> u16 {
+    30
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -189,6 +213,18 @@ pub(crate) struct SetHideAccountCredentialsArgs {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetAutoSwitchThresholdArgs {
+    pub(crate) threshold: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetCostUsageRangeDaysArgs {
+    pub(crate) range_days: u16,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetLaunchOnLoginArgs {
     pub(crate) enabled: bool,
 }
@@ -216,10 +252,18 @@ pub(crate) struct AppUpdateProgress {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CostUsageDailyPoint {
     pub(crate) day_key: String,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) project: Option<String>,
     pub(crate) input_tokens: i64,
     pub(crate) cached_input_tokens: i64,
     pub(crate) output_tokens: i64,
     pub(crate) total_tokens: i64,
+    #[serde(default)]
+    pub(crate) cost_usd: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -229,6 +273,14 @@ pub(crate) struct CostUsageSnapshot {
     pub(crate) today_cost_usd: Option<f64>,
     pub(crate) last_30_days_tokens: i64,
     pub(crate) last_30_days_cost_usd: Option<f64>,
+    #[serde(default = "default_cost_usage_range_days")]
+    pub(crate) range_days: u16,
+    #[serde(default)]
+    pub(crate) timezone: Option<String>,
+    #[serde(default)]
+    pub(crate) today_key: Option<String>,
+    #[serde(default)]
+    pub(crate) scan_stats: Option<CostUsageScanStats>,
     pub(crate) daily: Vec<CostUsageDailyPoint>,
     pub(crate) updated_at: i64,
 }
@@ -240,11 +292,55 @@ pub(crate) struct CodexOverviewSnapshot {
     pub(crate) usage_by_account_id: HashMap<String, UsageSnapshot>,
     pub(crate) errors_by_account_id: HashMap<String, AccountIssue>,
     #[serde(default)]
+    pub(crate) diagnostics_by_account_id: HashMap<String, AccountRefreshDiagnostics>,
+    #[serde(default)]
+    pub(crate) stale_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) last_successful_at: Option<i64>,
+    #[serde(default)]
+    pub(crate) last_attempt_at: Option<i64>,
+    #[serde(default)]
     pub(crate) quota_events: Vec<QuotaEvent>,
     pub(crate) cost_usage: Option<CostUsageSnapshot>,
     pub(crate) cost_error: Option<String>,
     pub(crate) generated_at: i64,
     pub(crate) stale: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CostUsageScanStats {
+    pub(crate) files_scanned: usize,
+    pub(crate) files_reused: usize,
+    pub(crate) files_removed: usize,
+    pub(crate) events_retained: usize,
+    pub(crate) retention_days: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountRefreshDiagnostics {
+    #[serde(default)]
+    pub(crate) attempts: Vec<ProviderFetchAttempt>,
+    pub(crate) last_successful_at: Option<i64>,
+    pub(crate) last_attempt_at: Option<i64>,
+    pub(crate) stale_reason: Option<String>,
+    pub(crate) cache_status: Option<String>,
+    pub(crate) scan_stats: Option<String>,
+    pub(crate) auto_switch_preview: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderFetchAttempt {
+    pub(crate) provider_id: String,
+    pub(crate) source_mode: CodexUsageSourceMode,
+    pub(crate) status: String,
+    pub(crate) started_at: i64,
+    pub(crate) finished_at: Option<i64>,
+    pub(crate) error_class: Option<String>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -384,6 +480,7 @@ fn policy_for_command(cmd: &str) -> InvokePolicy {
         | "get_claude_settings"
         | "get_codex_settings"
         | "get_codex_notification_status"
+        | "validate_wovo_config"
         | "check_app_update" => InvokePolicy {
             timeout_ms: 10_000,
             retries: 2,
@@ -405,11 +502,15 @@ fn policy_for_command(cmd: &str) -> InvokePolicy {
         | "set_claude_cost_usage_enabled"
         | "set_claude_notifications_enabled"
         | "set_claude_auto_account_switching_enabled"
+        | "set_claude_auto_switch_threshold_percent"
+        | "set_claude_cost_usage_range_days"
         | "set_claude_hide_account_credentials"
         | "set_codex_usage_source_mode"
         | "set_codex_cost_usage_enabled"
         | "set_codex_notifications_enabled"
         | "set_codex_auto_account_switching_enabled"
+        | "set_codex_auto_switch_threshold_percent"
+        | "set_codex_cost_usage_range_days"
         | "set_codex_hide_account_credentials"
         | "set_codex_launch_on_login"
         | "open_notification_settings" => InvokePolicy {

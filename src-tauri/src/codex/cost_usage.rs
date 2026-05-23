@@ -1,6 +1,6 @@
 use crate::codex::account_store::default_wovo_codex_root;
 use crate::codex::atomic_file::{replace_file, temporary_file_path, write_new_file};
-use crate::domain::usage::{CostUsageDailyPoint, CostUsageSnapshot};
+use crate::domain::usage::{CostUsageDailyPoint, CostUsageScanStats, CostUsageSnapshot};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,25 +10,24 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 mod pricing;
 
 use pricing::{codex_cost_usd, normalize_codex_model};
 
-const CACHE_FILE_NAME: &str = "codex-v1.json";
-const CACHE_VERSION: u16 = 1;
+const CACHE_FILE_NAME: &str = "codex-v2.json";
+const CACHE_VERSION: u16 = 3;
 const DEFAULT_MODEL: &str = "gpt-5";
-
-type PackedDays = BTreeMap<String, BTreeMap<String, Vec<i64>>>;
+const DEFAULT_RANGE_DAYS: u16 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CostUsageCache {
     version: u16,
     last_scan_unix_ms: i64,
+    retention_days: u16,
     files: BTreeMap<String, CostUsageFileUsage>,
-    days: PackedDays,
     roots: Option<BTreeMap<String, i64>>,
 }
 
@@ -37,12 +36,31 @@ struct CostUsageCache {
 struct CostUsageFileUsage {
     mtime_unix_ms: i64,
     size: i64,
-    days: PackedDays,
+    events: Vec<CostUsageEvent>,
     parsed_bytes: Option<i64>,
     last_model: Option<String>,
     last_totals: Option<CodexTotals>,
     session_id: Option<String>,
     forked_from_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CostUsageEvent {
+    timestamp_unix: i64,
+    model: String,
+    session_id: Option<String>,
+    project: Option<String>,
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: Option<f64>,
+    // Set only when the source row lacked an offset/Z and we synthesized
+    // timestamp_unix from the parsed YYYY-MM-DD prefix. The string anchors
+    // the bucket on the wire-format day so a later local-offset rebucket
+    // cannot shift the row off its original calendar day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    naive_day_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,16 +76,24 @@ struct DayRange {
     until_key: String,
     scan_since_key: String,
     scan_until_key: String,
+    retention_days: u16,
 }
 
 #[derive(Debug, Clone)]
 struct ParseResult {
-    days: PackedDays,
+    events: Vec<CostUsageEvent>,
     parsed_bytes: i64,
     last_model: Option<String>,
     last_totals: Option<CodexTotals>,
     session_id: Option<String>,
     forked_from_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScanStatsAccumulator {
+    files_scanned: usize,
+    files_reused: usize,
+    files_removed: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -93,15 +119,17 @@ pub fn local_codex_logs_exist(codex_home: &Path) -> bool {
     .any(|root| first_jsonl_file(&root).is_some())
 }
 
-pub fn load_cost_usage_snapshot(
+pub fn load_cost_usage_snapshot_with_range(
     source_root: PathBuf,
     force_rescan: bool,
+    range_days: u16,
 ) -> Result<CostUsageSnapshot, AppError> {
     load_cost_usage_snapshot_at(
         source_root,
         default_wovo_codex_root().join("cache"),
         OffsetDateTime::now_utc(),
         force_rescan,
+        range_days,
     )
 }
 
@@ -110,21 +138,30 @@ fn load_cost_usage_snapshot_at(
     cache_root: PathBuf,
     now: OffsetDateTime,
     force_rescan: bool,
+    range_days: u16,
 ) -> Result<CostUsageSnapshot, AppError> {
-    let range = DayRange::new(now);
+    let output_range_days = normalize_range_days(range_days);
+    let offset = local_utc_offset();
+    let range = DayRange::new(now, output_range_days, offset);
     let mut cache = if force_rescan {
         CostUsageCache::new()
     } else {
         load_cache(&cache_root).unwrap_or_default()
     };
+    if cache.retention_days < output_range_days {
+        cache = CostUsageCache::new();
+    }
+    cache.retention_days = output_range_days;
 
-    scan_roots(&source_root, &range, &mut cache, now, force_rescan)?;
+    let stats = scan_roots(&source_root, &range, &mut cache, now, force_rescan)?;
     save_cache(&cache_root, &cache)?;
 
     Ok(build_snapshot_from_cache(
         &cache,
         &range,
         now,
+        offset,
+        stats,
         source_root.to_string_lossy().to_string(),
     ))
 }
@@ -134,8 +171,8 @@ impl CostUsageCache {
         Self {
             version: CACHE_VERSION,
             last_scan_unix_ms: 0,
+            retention_days: DEFAULT_RANGE_DAYS,
             files: BTreeMap::new(),
-            days: BTreeMap::new(),
             roots: None,
         }
     }
@@ -148,13 +185,16 @@ impl Default for CostUsageCache {
 }
 
 impl DayRange {
-    fn new(now: OffsetDateTime) -> Self {
-        let since = now - Duration::days(29);
+    fn new(now: OffsetDateTime, range_days: u16, offset: UtcOffset) -> Self {
+        let range_days = normalize_range_days(range_days);
+        let local_now = now.to_offset(offset);
+        let since = local_now - Duration::days(i64::from(range_days.saturating_sub(1)));
         Self {
             since_key: day_key_from_datetime(since),
-            until_key: day_key_from_datetime(now),
+            until_key: day_key_from_datetime(local_now),
             scan_since_key: day_key_from_datetime(since - Duration::days(1)),
-            scan_until_key: day_key_from_datetime(now + Duration::days(1)),
+            scan_until_key: day_key_from_datetime(local_now + Duration::days(1)),
+            retention_days: range_days,
         }
     }
 
@@ -173,7 +213,7 @@ fn scan_roots(
     cache: &mut CostUsageCache,
     now: OffsetDateTime,
     _force_rescan: bool,
-) -> Result<(), AppError> {
+) -> Result<ScanStatsAccumulator, AppError> {
     let roots = [
         source_root.join("sessions"),
         source_root.join("archived_sessions"),
@@ -194,10 +234,18 @@ fn scan_roots(
     let session_index = build_session_index(&files);
     let mut seen_session_ids = HashSet::new();
     let mut file_paths_in_scan = HashSet::new();
+    let mut stats = ScanStatsAccumulator::default();
 
     for file in files {
         file_paths_in_scan.insert(file.to_string_lossy().to_string());
-        scan_file_into_cache(&file, range, cache, &mut seen_session_ids, &session_index)?;
+        scan_file_into_cache(
+            &file,
+            range,
+            cache,
+            &mut seen_session_ids,
+            &session_index,
+            &mut stats,
+        )?;
     }
 
     let stale_paths: Vec<String> = cache
@@ -207,19 +255,17 @@ fn scan_roots(
         .cloned()
         .collect();
     for path in stale_paths {
-        if let Some(old) = cache.files.remove(&path) {
-            apply_file_days(&mut cache.days, &old.days, -1);
+        if cache.files.remove(&path).is_some() {
+            stats.files_removed += 1;
         }
     }
 
-    prune_days(
-        &mut cache.days,
-        &range.scan_since_key,
-        &range.scan_until_key,
-    );
+    for usage in cache.files.values_mut() {
+        prune_file_usage(usage, range);
+    }
     cache.roots = Some(roots_fingerprint);
     cache.last_scan_unix_ms = now.unix_timestamp() * 1000;
-    Ok(())
+    Ok(stats)
 }
 
 fn scan_file_into_cache(
@@ -228,13 +274,14 @@ fn scan_file_into_cache(
     cache: &mut CostUsageCache,
     seen_session_ids: &mut HashSet<String>,
     session_index: &HashMap<String, PathBuf>,
+    stats: &mut ScanStatsAccumulator,
 ) -> Result<(), AppError> {
     let path = file.to_string_lossy().to_string();
     let metadata = match fs::metadata(file) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(old) = cache.files.remove(&path) {
-                apply_file_days(&mut cache.days, &old.days, -1);
+            if cache.files.remove(&path).is_some() {
+                stats.files_removed += 1;
             }
             return Ok(());
         }
@@ -249,8 +296,8 @@ fn scan_file_into_cache(
         .and_then(|cached| cached.session_id.as_deref())
     {
         if seen_session_ids.contains(session_id) {
-            if let Some(old) = cache.files.remove(&path) {
-                apply_file_days(&mut cache.days, &old.days, -1);
+            if cache.files.remove(&path).is_some() {
+                stats.files_removed += 1;
             }
             return Ok(());
         }
@@ -265,6 +312,7 @@ fn scan_file_into_cache(
             if let Some(session_id) = cached.session_id.as_deref() {
                 seen_session_ids.insert(session_id.to_string());
             }
+            stats.files_reused += 1;
             return Ok(());
         }
     }
@@ -291,25 +339,21 @@ fn scan_file_into_cache(
                 .or_else(|| cached.session_id.clone());
             if let Some(session_id) = session_id.as_deref() {
                 if seen_session_ids.contains(session_id) {
-                    if let Some(old) = cache.files.remove(&path) {
-                        apply_file_days(&mut cache.days, &old.days, -1);
+                    if cache.files.remove(&path).is_some() {
+                        stats.files_removed += 1;
                     }
                     return Ok(());
                 }
             }
 
-            if !parsed.days.is_empty() {
-                apply_file_days(&mut cache.days, &parsed.days, 1);
-            }
-
-            let mut merged_days = cached.days.clone();
-            merge_file_days(&mut merged_days, &parsed.days);
+            let mut merged_events = cached.events.clone();
+            merged_events.extend(parsed.events);
             cache.files.insert(
                 path,
                 CostUsageFileUsage {
                     mtime_unix_ms,
                     size,
-                    days: merged_days,
+                    events: merged_events,
                     parsed_bytes: Some(parsed.parsed_bytes),
                     last_model: parsed.last_model,
                     last_totals: parsed.last_totals,
@@ -322,13 +366,12 @@ fn scan_file_into_cache(
             if let Some(session_id) = session_id {
                 seen_session_ids.insert(session_id);
             }
+            stats.files_scanned += 1;
             return Ok(());
         }
     }
 
-    if let Some(old) = cached {
-        apply_file_days(&mut cache.days, &old.days, -1);
-    }
+    let _ = cached;
 
     let inherited = inherited_totals(file, session_index)?;
     let parsed = parse_codex_file(file, range, 0, None, None, inherited)?;
@@ -336,17 +379,17 @@ fn scan_file_into_cache(
     if let Some(session_id) = session_id.as_deref() {
         if seen_session_ids.contains(session_id) {
             cache.files.remove(&path);
+            stats.files_removed += 1;
             return Ok(());
         }
     }
 
-    apply_file_days(&mut cache.days, &parsed.days, 1);
     cache.files.insert(
         path,
         CostUsageFileUsage {
             mtime_unix_ms,
             size,
-            days: parsed.days,
+            events: parsed.events,
             parsed_bytes: Some(parsed.parsed_bytes),
             last_model: parsed.last_model,
             last_totals: parsed.last_totals,
@@ -357,6 +400,7 @@ fn scan_file_into_cache(
     if let Some(session_id) = session_id {
         seen_session_ids.insert(session_id);
     }
+    stats.files_scanned += 1;
     Ok(())
 }
 
@@ -401,7 +445,7 @@ fn parse_codex_file(
     let mut previous_totals = initial_totals;
     let mut session_id = None;
     let mut forked_from_id = None;
-    let mut days: PackedDays = BTreeMap::new();
+    let mut events = Vec::new();
 
     if start_offset == 0 {
         if let Some(metadata) = parse_session_metadata(file)? {
@@ -537,48 +581,45 @@ fn parse_codex_file(
             return;
         }
         let cached = delta.cached.min(delta.input);
-        add_day_usage(
-            &mut days,
-            range,
-            &day_key,
-            &model,
-            delta.input,
-            cached,
-            delta.output,
-        );
+        let normalized_model = normalize_codex_model(&model);
+        if range.contains_scan_day(&day_key) {
+            let (timestamp_unix, naive_day_key) = match timestamp_unix(timestamp) {
+                Some(unix) => (Some(unix), None),
+                None => (unix_from_day_key(&day_key), Some(day_key.clone())),
+            };
+            if let Some(timestamp_unix) = timestamp_unix {
+                let cost_usd = codex_cost_usd(&normalized_model, delta.input, cached, delta.output);
+                events.push(CostUsageEvent {
+                    timestamp_unix,
+                    model: normalized_model,
+                    session_id: session_id.clone(),
+                    project: None,
+                    input_tokens: delta.input,
+                    cached_input_tokens: cached,
+                    output_tokens: delta.output,
+                    cost_usd,
+                    naive_day_key,
+                });
+            }
+        }
     })?;
 
+    if session_id.is_some() {
+        for event in &mut events {
+            if event.session_id.is_none() {
+                event.session_id.clone_from(&session_id);
+            }
+        }
+    }
+
     Ok(ParseResult {
-        days,
+        events,
         parsed_bytes,
         last_model: current_model,
         last_totals: previous_totals,
         session_id,
         forked_from_id,
     })
-}
-
-fn add_day_usage(
-    days: &mut PackedDays,
-    range: &DayRange,
-    day_key: &str,
-    model: &str,
-    input: i64,
-    cached: i64,
-    output: i64,
-) {
-    if !range.contains_scan_day(day_key) {
-        return;
-    }
-    let normalized_model = normalize_codex_model(model);
-    let day_models = days.entry(day_key.to_string()).or_default();
-    let packed = day_models
-        .entry(normalized_model)
-        .or_insert_with(|| vec![0, 0, 0]);
-    ensure_packed_len(packed);
-    packed[0] += input;
-    packed[1] += cached;
-    packed[2] += output;
 }
 
 fn parse_token_snapshots(file: &Path) -> Result<Vec<TimestampedTotals>, AppError> {
@@ -700,9 +741,11 @@ fn build_snapshot_from_cache(
     cache: &CostUsageCache,
     range: &DayRange,
     now: OffsetDateTime,
+    offset: UtcOffset,
+    stats: ScanStatsAccumulator,
     source_root: String,
 ) -> CostUsageSnapshot {
-    let today_key = day_key_from_datetime(now);
+    let today_key = day_key_from_datetime(now.to_offset(offset));
     let mut daily = Vec::new();
     let mut last_30_days_tokens = 0;
     let mut last_30_days_cost = 0.0;
@@ -711,31 +754,50 @@ fn build_snapshot_from_cache(
     let mut today_cost = 0.0;
     let mut today_priced = true;
 
-    for (day_key, models) in &cache.days {
-        if !range.contains_output_day(day_key) {
+    let mut by_day = BTreeMap::<String, DailyTotals>::new();
+    let mut events_retained = 0;
+    for event in cache.files.values().flat_map(|file| file.events.iter()) {
+        let Some(day_key) = event_day_key(event, offset) else {
+            continue;
+        };
+        if !range.contains_output_day(&day_key) {
             continue;
         }
-        let mut input_tokens = 0;
-        let mut cached_input_tokens = 0;
-        let mut output_tokens = 0;
-        let mut day_cost = 0.0;
-        let mut day_priced = true;
-
-        for (model, packed) in models {
-            let input = packed_value(packed, 0);
-            let cached = packed_value(packed, 1);
-            let output = packed_value(packed, 2);
-            input_tokens += input;
-            cached_input_tokens += cached;
-            output_tokens += output;
-            if let Some(cost) = codex_cost_usd(model, input, cached, output) {
-                day_cost += cost;
-            } else {
-                day_priced = false;
+        events_retained += 1;
+        let day = by_day.entry(day_key).or_default();
+        day.input_tokens += event.input_tokens;
+        day.cached_input_tokens += event.cached_input_tokens;
+        day.output_tokens += event.output_tokens;
+        match event.cost_usd {
+            Some(cost) => {
+                day.cost_usd += cost;
+                day.has_priced_cost = true;
+            }
+            None => {
+                day.has_unpriced_cost = true;
             }
         }
+        if day.model.is_none() {
+            day.model = Some(event.model.clone());
+        }
+        if day.session_id.is_none() {
+            day.session_id.clone_from(&event.session_id);
+        }
+        if day.project.is_none() {
+            day.project.clone_from(&event.project);
+        }
+    }
 
+    for (day_key, totals) in by_day {
+        if !range.contains_output_day(&day_key) {
+            continue;
+        }
+        let input_tokens = totals.input_tokens;
+        let cached_input_tokens = totals.cached_input_tokens;
+        let output_tokens = totals.output_tokens;
         let total_tokens = input_tokens + output_tokens;
+        let day_cost = totals.cost_usd;
+        let day_priced = !totals.has_unpriced_cost;
         last_30_days_tokens += total_tokens;
         if day_priced {
             last_30_days_cost += day_cost;
@@ -743,7 +805,7 @@ fn build_snapshot_from_cache(
             last_30_days_priced = false;
         }
 
-        if day_key == &today_key {
+        if day_key == today_key {
             today_tokens = total_tokens;
             today_cost = day_cost;
             today_priced = day_priced;
@@ -751,6 +813,9 @@ fn build_snapshot_from_cache(
 
         daily.push(CostUsageDailyPoint {
             day_key: day_key.clone(),
+            model: totals.model,
+            session_id: totals.session_id,
+            project: totals.project,
             input_tokens,
             cached_input_tokens,
             output_tokens,
@@ -764,59 +829,48 @@ fn build_snapshot_from_cache(
         today_cost_usd: today_priced.then_some(today_cost),
         last_30_days_tokens,
         last_30_days_cost_usd: last_30_days_priced.then_some(last_30_days_cost),
+        range_days: range.retention_days,
+        timezone: Some(timezone_label(offset)),
+        today_key: Some(today_key),
+        scan_stats: Some(CostUsageScanStats {
+            files_scanned: stats.files_scanned,
+            files_reused: stats.files_reused,
+            files_removed: stats.files_removed,
+            events_retained,
+            retention_days: range.retention_days,
+        }),
         daily,
         updated_at: now.unix_timestamp(),
         source_root,
     }
 }
 
-fn apply_file_days(cache_days: &mut PackedDays, file_days: &PackedDays, sign: i64) {
-    for (day, models) in file_days {
-        let remove_day = {
-            let day_models = cache_days.entry(day.clone()).or_default();
-            for (model, packed) in models {
-                let existing = day_models
-                    .entry(model.clone())
-                    .or_insert_with(|| vec![0, 0, 0]);
-                ensure_packed_len(existing);
-                for (index, value) in existing.iter_mut().enumerate().take(3) {
-                    *value = (*value + sign * packed_value(packed, index)).max(0);
-                }
-                if existing.iter().all(|value| *value == 0) {
-                    day_models.remove(model);
-                }
-            }
-            day_models.is_empty()
-        };
-        if remove_day {
-            cache_days.remove(day);
-        }
+#[derive(Default)]
+struct DailyTotals {
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: f64,
+    has_priced_cost: bool,
+    has_unpriced_cost: bool,
+    model: Option<String>,
+    session_id: Option<String>,
+    project: Option<String>,
+}
+
+fn prune_file_usage(usage: &mut CostUsageFileUsage, range: &DayRange) {
+    usage.events.retain(|event| {
+        event_day_key(event, UtcOffset::UTC)
+            .map(|day_key| range.contains_scan_day(&day_key))
+            .unwrap_or(false)
+    });
+}
+
+fn event_day_key(event: &CostUsageEvent, offset: UtcOffset) -> Option<String> {
+    if let Some(naive) = event.naive_day_key.as_deref() {
+        return Some(naive.to_string());
     }
-}
-
-fn merge_file_days(existing: &mut PackedDays, delta: &PackedDays) {
-    apply_file_days(existing, delta, 1);
-}
-
-fn prune_days(days: &mut PackedDays, since_key: &str, until_key: &str) {
-    let stale: Vec<String> = days
-        .keys()
-        .filter(|day| day.as_str() < since_key || day.as_str() > until_key)
-        .cloned()
-        .collect();
-    for key in stale {
-        days.remove(&key);
-    }
-}
-
-fn ensure_packed_len(values: &mut Vec<i64>) {
-    while values.len() < 3 {
-        values.push(0);
-    }
-}
-
-fn packed_value(values: &[i64], index: usize) -> i64 {
-    values.get(index).copied().unwrap_or(0)
+    day_key_from_unix_with_offset(event.timestamp_unix, offset)
 }
 
 fn build_session_index(files: &[PathBuf]) -> HashMap<String, PathBuf> {
@@ -1009,6 +1063,48 @@ fn metadata_mtime_ms(metadata: &fs::Metadata) -> i64 {
 
 fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn timestamp_unix(value: &str) -> Option<i64> {
+    parse_timestamp(value).map(|timestamp| timestamp.unix_timestamp())
+}
+
+fn unix_from_day_key(day_key: &str) -> Option<i64> {
+    let mut parts = day_key.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u8>().ok()?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    let date = time::Date::from_calendar_date(year, month.try_into().ok()?, day).ok()?;
+    Some(date.midnight().assume_utc().unix_timestamp())
+}
+
+fn day_key_from_unix_with_offset(timestamp_unix: i64, offset: UtcOffset) -> Option<String> {
+    OffsetDateTime::from_unix_timestamp(timestamp_unix)
+        .ok()
+        .map(|timestamp| day_key_from_datetime(timestamp.to_offset(offset)))
+}
+
+fn local_utc_offset() -> UtcOffset {
+    UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC)
+}
+
+fn timezone_label(offset: UtcOffset) -> String {
+    if offset == UtcOffset::UTC {
+        return "UTC".to_string();
+    }
+    let seconds = offset.whole_seconds();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let seconds = seconds.abs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    format!("UTC{sign}{hours:02}:{minutes:02}")
+}
+
+fn normalize_range_days(range_days: u16) -> u16 {
+    match range_days {
+        7 | 30 | 90 => range_days,
+        _ => DEFAULT_RANGE_DAYS,
+    }
 }
 
 fn day_key_from_timestamp(value: &str) -> Option<String> {

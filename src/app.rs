@@ -6,9 +6,9 @@ use crate::app_actions::{
 use crate::app_context::{AppUiState, CodexOverviewState, SettingsState};
 use crate::auto_switch_runway::auto_switch_runway_estimate;
 use crate::codex_api::{
-    js_command_error, listen_tauri, AccountIssue, AccountSummary, AppUpdateInfo, AppUpdateProgress,
-    CodexOverviewSnapshot, CodexSettings, CodexUsageSourceMode, CostUsageSnapshot,
-    NotificationStatus, QuotaEvent, UsageSnapshot,
+    js_command_error, listen_tauri, AccountIssue, AccountRefreshDiagnostics, AccountSummary,
+    AppUpdateInfo, AppUpdateProgress, CodexOverviewSnapshot, CodexSettings, CodexUsageSourceMode,
+    CostUsageSnapshot, NotificationStatus, QuotaEvent, UsageSnapshot,
 };
 use crate::components::nav::AppNav;
 use crate::components::settings_panel::{SettingsPanel, SettingsPanelActions, SettingsPanelState};
@@ -50,14 +50,19 @@ pub fn App() -> impl IntoView {
     let (accounts, set_accounts) = signal::<Vec<AccountSummary>>(Vec::new());
     let (usage_by_id, set_usage_by_id) = signal::<HashMap<String, UsageSnapshot>>(HashMap::new());
     let (errors_by_id, set_errors_by_id) = signal::<HashMap<String, AccountIssue>>(HashMap::new());
+    let (diagnostics_by_id, set_diagnostics_by_id) =
+        signal::<HashMap<String, AccountRefreshDiagnostics>>(HashMap::new());
     let (quota_events, set_quota_events) = signal::<Vec<QuotaEvent>>(Vec::new());
     let (dismissed_quota_event_ids, set_dismissed_quota_event_ids) =
         signal::<HashSet<String>>(HashSet::new());
     let (loading_ids, set_loading_ids) = signal::<HashSet<String>>(HashSet::new());
     let (reauth_ids, set_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
+    let (schema_version, set_schema_version) = signal(0_u16);
     let (usage_source_mode, set_usage_source_mode) = signal(CodexUsageSourceMode::Auto);
     let (theme_mode, set_theme_mode) = signal(initial_theme_mode);
     let (cost_usage_enabled, set_cost_usage_enabled) = signal(false);
+    let (auto_switch_threshold_percent, set_auto_switch_threshold_percent) = signal(90.0);
+    let (cost_usage_range_days, set_cost_usage_range_days) = signal(30_u16);
     let (notifications_enabled, set_notifications_enabled) = signal(true);
     let (auto_account_switching_enabled, set_auto_account_switching_enabled) = signal(false);
     let (hide_account_credentials, set_hide_account_credentials) = signal(true);
@@ -68,19 +73,30 @@ pub fn App() -> impl IntoView {
     let (cost_error, set_cost_error) = signal::<Option<String>>(None);
     let (snapshot_generated_at, set_snapshot_generated_at) = signal::<Option<i64>>(None);
     let (snapshot_stale, set_snapshot_stale) = signal(false);
+    let (snapshot_stale_reason, set_snapshot_stale_reason) = signal::<Option<String>>(None);
+    let (snapshot_last_successful_at, set_snapshot_last_successful_at) =
+        signal::<Option<i64>>(None);
+    let (snapshot_last_attempt_at, set_snapshot_last_attempt_at) = signal::<Option<i64>>(None);
+    let (config_warnings, set_config_warnings) = signal::<Vec<String>>(Vec::new());
     let (claude_accounts, set_claude_accounts) = signal::<Vec<AccountSummary>>(Vec::new());
     let (claude_usage_by_id, set_claude_usage_by_id) =
         signal::<HashMap<String, UsageSnapshot>>(HashMap::new());
     let (claude_errors_by_id, set_claude_errors_by_id) =
         signal::<HashMap<String, AccountIssue>>(HashMap::new());
+    let (claude_diagnostics_by_id, set_claude_diagnostics_by_id) =
+        signal::<HashMap<String, AccountRefreshDiagnostics>>(HashMap::new());
     let (claude_quota_events, set_claude_quota_events) = signal::<Vec<QuotaEvent>>(Vec::new());
     let (claude_dismissed_quota_event_ids, set_claude_dismissed_quota_event_ids) =
         signal::<HashSet<String>>(HashSet::new());
     let (claude_loading_ids, set_claude_loading_ids) = signal::<HashSet<String>>(HashSet::new());
     let (claude_reauth_ids, set_claude_reauth_ids) = signal::<HashSet<String>>(HashSet::new());
+    let (claude_schema_version, set_claude_schema_version) = signal(0_u16);
     let (claude_usage_source_mode, set_claude_usage_source_mode) =
         signal(CodexUsageSourceMode::Auto);
     let (claude_cost_usage_enabled, set_claude_cost_usage_enabled) = signal(false);
+    let (claude_auto_switch_threshold_percent, set_claude_auto_switch_threshold_percent) =
+        signal(90.0);
+    let (claude_cost_usage_range_days, set_claude_cost_usage_range_days) = signal(30_u16);
     let (claude_notifications_enabled, set_claude_notifications_enabled) = signal(true);
     let (claude_auto_account_switching_enabled, set_claude_auto_account_switching_enabled) =
         signal(false);
@@ -90,6 +106,13 @@ pub fn App() -> impl IntoView {
     let (claude_snapshot_generated_at, set_claude_snapshot_generated_at) =
         signal::<Option<i64>>(None);
     let (claude_snapshot_stale, set_claude_snapshot_stale) = signal(false);
+    let (claude_snapshot_stale_reason, set_claude_snapshot_stale_reason) =
+        signal::<Option<String>>(None);
+    let (claude_snapshot_last_successful_at, set_claude_snapshot_last_successful_at) =
+        signal::<Option<i64>>(None);
+    let (claude_snapshot_last_attempt_at, set_claude_snapshot_last_attempt_at) =
+        signal::<Option<i64>>(None);
+    let (claude_config_warnings, set_claude_config_warnings) = signal::<Vec<String>>(Vec::new());
     let (claude_initial_refresh_started, set_claude_initial_refresh_started) = signal(false);
     let (claude_is_listing, set_claude_is_listing) = signal(true);
     let (claude_is_account_action_loading, set_claude_is_account_action_loading) = signal(false);
@@ -129,6 +152,10 @@ pub fn App() -> impl IntoView {
         ProviderPage::Codex => errors_by_id.get(),
         ProviderPage::Anthropic => claude_errors_by_id.get(),
     });
+    let active_diagnostics_by_id = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => diagnostics_by_id.get(),
+        ProviderPage::Anthropic => claude_diagnostics_by_id.get(),
+    });
     let active_loading_ids = Signal::derive(move || match active_provider.get() {
         ProviderPage::Codex => loading_ids.get(),
         ProviderPage::Anthropic => claude_loading_ids.get(),
@@ -148,6 +175,18 @@ pub fn App() -> impl IntoView {
     let active_snapshot_stale = Signal::derive(move || match active_provider.get() {
         ProviderPage::Codex => snapshot_stale.get(),
         ProviderPage::Anthropic => claude_snapshot_stale.get(),
+    });
+    let active_snapshot_stale_reason = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => snapshot_stale_reason.get(),
+        ProviderPage::Anthropic => claude_snapshot_stale_reason.get(),
+    });
+    let active_snapshot_last_successful_at = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => snapshot_last_successful_at.get(),
+        ProviderPage::Anthropic => claude_snapshot_last_successful_at.get(),
+    });
+    let active_snapshot_last_attempt_at = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => snapshot_last_attempt_at.get(),
+        ProviderPage::Anthropic => claude_snapshot_last_attempt_at.get(),
     });
     let active_hide_account_credentials = Signal::derive(move || match active_provider.get() {
         ProviderPage::Codex => hide_account_credentials.get(),
@@ -179,6 +218,7 @@ pub fn App() -> impl IntoView {
         set_accounts,
         set_usage_by_id,
         set_errors_by_id,
+        set_diagnostics_by_id,
         set_quota_events,
         set_dismissed_quota_event_ids,
         set_loading_ids,
@@ -188,6 +228,9 @@ pub fn App() -> impl IntoView {
         snapshot_generated_at,
         set_snapshot_generated_at,
         set_snapshot_stale,
+        set_snapshot_stale_reason,
+        set_snapshot_last_successful_at,
+        set_snapshot_last_attempt_at,
         set_is_listing,
         set_global_error,
         snapshot_epoch,
@@ -199,6 +242,7 @@ pub fn App() -> impl IntoView {
         set_accounts: set_claude_accounts,
         set_usage_by_id: set_claude_usage_by_id,
         set_errors_by_id: set_claude_errors_by_id,
+        set_diagnostics_by_id: set_claude_diagnostics_by_id,
         set_quota_events: set_claude_quota_events,
         set_dismissed_quota_event_ids: set_claude_dismissed_quota_event_ids,
         set_loading_ids: set_claude_loading_ids,
@@ -208,6 +252,9 @@ pub fn App() -> impl IntoView {
         snapshot_generated_at: claude_snapshot_generated_at,
         set_snapshot_generated_at: set_claude_snapshot_generated_at,
         set_snapshot_stale: set_claude_snapshot_stale,
+        set_snapshot_stale_reason: set_claude_snapshot_stale_reason,
+        set_snapshot_last_successful_at: set_claude_snapshot_last_successful_at,
+        set_snapshot_last_attempt_at: set_claude_snapshot_last_attempt_at,
         set_is_listing: set_claude_is_listing,
         set_global_error,
         snapshot_epoch: claude_snapshot_epoch,
@@ -225,12 +272,19 @@ pub fn App() -> impl IntoView {
         set_cost_usage_command: "set_codex_cost_usage_enabled",
         set_notifications_command: "set_codex_notifications_enabled",
         set_auto_switching_command: "set_codex_auto_account_switching_enabled",
+        set_auto_switch_threshold_command: "set_codex_auto_switch_threshold_percent",
+        set_cost_usage_range_command: "set_codex_cost_usage_range_days",
         set_hide_credentials_command: "set_codex_hide_account_credentials",
         include_launch_on_login: true,
+        set_schema_version,
         usage_source_mode,
         set_usage_source_mode,
         cost_usage_enabled,
         set_cost_usage_enabled,
+        auto_switch_threshold_percent,
+        set_auto_switch_threshold_percent,
+        cost_usage_range_days,
+        set_cost_usage_range_days,
         notifications_enabled,
         set_notifications_enabled,
         auto_account_switching_enabled,
@@ -239,6 +293,7 @@ pub fn App() -> impl IntoView {
         set_hide_account_credentials,
         launch_on_login,
         set_launch_on_login,
+        set_config_warnings,
         set_revealed_credential,
         set_is_settings_loading,
         set_global_error,
@@ -252,12 +307,19 @@ pub fn App() -> impl IntoView {
         set_cost_usage_command: "set_claude_cost_usage_enabled",
         set_notifications_command: "set_claude_notifications_enabled",
         set_auto_switching_command: "set_claude_auto_account_switching_enabled",
+        set_auto_switch_threshold_command: "set_claude_auto_switch_threshold_percent",
+        set_cost_usage_range_command: "set_claude_cost_usage_range_days",
         set_hide_credentials_command: "set_claude_hide_account_credentials",
         include_launch_on_login: false,
+        set_schema_version: set_claude_schema_version,
         usage_source_mode: claude_usage_source_mode,
         set_usage_source_mode: set_claude_usage_source_mode,
         cost_usage_enabled: claude_cost_usage_enabled,
         set_cost_usage_enabled: set_claude_cost_usage_enabled,
+        auto_switch_threshold_percent: claude_auto_switch_threshold_percent,
+        set_auto_switch_threshold_percent: set_claude_auto_switch_threshold_percent,
+        cost_usage_range_days: claude_cost_usage_range_days,
+        set_cost_usage_range_days: set_claude_cost_usage_range_days,
         notifications_enabled: claude_notifications_enabled,
         set_notifications_enabled: set_claude_notifications_enabled,
         auto_account_switching_enabled: claude_auto_account_switching_enabled,
@@ -266,6 +328,7 @@ pub fn App() -> impl IntoView {
         set_hide_account_credentials: set_claude_hide_account_credentials,
         launch_on_login,
         set_launch_on_login,
+        set_config_warnings: set_claude_config_warnings,
         set_revealed_credential,
         set_is_settings_loading,
         set_global_error,
@@ -518,9 +581,26 @@ pub fn App() -> impl IntoView {
         ProviderPage::Codex => usage_source_mode.get(),
         ProviderPage::Anthropic => claude_usage_source_mode.get(),
     });
+    let active_schema_version = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => schema_version.get(),
+        ProviderPage::Anthropic => claude_schema_version.get(),
+    });
     let active_cost_usage_enabled = Signal::derive(move || match active_provider.get() {
         ProviderPage::Codex => cost_usage_enabled.get(),
         ProviderPage::Anthropic => claude_cost_usage_enabled.get(),
+    });
+    let active_auto_switch_threshold_percent =
+        Signal::derive(move || match active_provider.get() {
+            ProviderPage::Codex => auto_switch_threshold_percent.get(),
+            ProviderPage::Anthropic => claude_auto_switch_threshold_percent.get(),
+        });
+    let active_cost_usage_range_days = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => cost_usage_range_days.get(),
+        ProviderPage::Anthropic => claude_cost_usage_range_days.get(),
+    });
+    let active_config_warnings = Signal::derive(move || match active_provider.get() {
+        ProviderPage::Codex => config_warnings.get(),
+        ProviderPage::Anthropic => claude_config_warnings.get(),
     });
     let active_notifications_enabled = Signal::derive(move || match active_provider.get() {
         ProviderPage::Codex => notifications_enabled.get(),
@@ -667,8 +747,11 @@ pub fn App() -> impl IntoView {
                     is_open: is_settings_open,
                     theme_mode,
                     active_provider_label: Signal::derive(move || active_provider.get().label()),
+                    schema_version: active_schema_version,
                     usage_source_mode: active_usage_source_mode,
                     cost_usage_enabled: active_cost_usage_enabled,
+                    auto_switch_threshold_percent: active_auto_switch_threshold_percent,
+                    cost_usage_range_days: active_cost_usage_range_days,
                     notifications_enabled: active_notifications_enabled,
                     notification_status,
                     is_notification_test_sending,
@@ -676,6 +759,12 @@ pub fn App() -> impl IntoView {
                     launch_on_login,
                     auto_account_switching_enabled: active_auto_account_switching_enabled,
                     auto_switch_runway,
+                    config_warnings: active_config_warnings,
+                    diagnostics_by_account_id: active_diagnostics_by_id,
+                    snapshot_stale_reason: active_snapshot_stale_reason,
+                    snapshot_last_successful_at: active_snapshot_last_successful_at,
+                    snapshot_last_attempt_at: active_snapshot_last_attempt_at,
+                    cost_usage: active_cost_usage,
                     is_settings_loading,
                     is_listing: active_is_listing,
                 }}
@@ -704,6 +793,14 @@ pub fn App() -> impl IntoView {
                     on_change_auto_switching: Box::new(move |enabled| match active_provider.get() {
                         ProviderPage::Codex => settings_actions.change_auto_account_switching_enabled(enabled),
                         ProviderPage::Anthropic => claude_settings_actions.change_auto_account_switching_enabled(enabled),
+                    }),
+                    on_change_auto_switch_threshold: Box::new(move |threshold| match active_provider.get() {
+                        ProviderPage::Codex => settings_actions.change_auto_switch_threshold_percent(threshold),
+                        ProviderPage::Anthropic => claude_settings_actions.change_auto_switch_threshold_percent(threshold),
+                    }),
+                    on_change_cost_usage_range: Box::new(move |range_days| match active_provider.get() {
+                        ProviderPage::Codex => settings_actions.change_cost_usage_range_days(range_days),
+                        ProviderPage::Anthropic => claude_settings_actions.change_cost_usage_range_days(range_days),
                     }),
                 }}
             />

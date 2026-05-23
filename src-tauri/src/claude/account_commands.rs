@@ -12,6 +12,8 @@ use crate::claude::token_refresh;
 use crate::claude::usage_fetcher;
 use crate::domain::account::AccountSummary;
 use crate::error::AppError;
+use crate::provider::ProviderId;
+use crate::provider_state;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, State};
@@ -173,7 +175,9 @@ pub(crate) fn remove_claude_account(_app: AppHandle, account_id: String) -> Resu
             return Err(AppError::ClaudeLiveAccountRemovalBlocked);
         }
     }
-    store.remove_account(&account_id)
+    store.remove_account(&account_id)?;
+    let _ = provider_state::purge_account_state(ProviderId::Claude, &account_id);
+    Ok(())
 }
 
 #[tauri::command]

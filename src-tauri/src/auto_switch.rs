@@ -1,10 +1,25 @@
+use crate::codex::settings::{
+    DEFAULT_AUTO_SWITCH_THRESHOLD_PERCENT, DEFAULT_WEEKLY_PENALTY_THRESHOLD_PERCENT,
+};
 use crate::domain::account::{AccountSourceKind, AccountSummary};
 use crate::domain::usage::{AccountIssue, UsageSnapshot, UsageWindow};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-const AUTO_SWITCH_THRESHOLD_PERCENT: f64 = 90.0;
-const WEEKLY_PENALTY_THRESHOLD: f64 = 20.0;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AutoSwitchPolicy {
+    pub(crate) auto_switch_threshold_percent: f64,
+    pub(crate) weekly_penalty_threshold_percent: f64,
+}
+
+impl Default for AutoSwitchPolicy {
+    fn default() -> Self {
+        Self {
+            auto_switch_threshold_percent: DEFAULT_AUTO_SWITCH_THRESHOLD_PERCENT,
+            weekly_penalty_threshold_percent: DEFAULT_WEEKLY_PENALTY_THRESHOLD_PERCENT,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UsageWindowKey {
@@ -33,6 +48,8 @@ pub(crate) struct AutoSwitchNotification {
 pub(crate) struct AutoSwitchCandidate {
     pub(crate) current_account_id: String,
     pub(crate) target_account_id: String,
+    pub(crate) window_key: String,
+    pub(crate) trigger_reset_at: Option<i64>,
     pub(crate) notification: AutoSwitchNotification,
 }
 
@@ -95,10 +112,31 @@ fn compute_switch_score(
     (score, primary_remaining, weekly_remaining)
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "kept as the default-policy helper for tests and stable internal call sites"
+    )
+)]
 pub(crate) fn auto_switch_candidate(
     accounts: &[AccountSummary],
     usage_by_account_id: &HashMap<String, UsageSnapshot>,
     errors_by_account_id: &HashMap<String, AccountIssue>,
+) -> Option<AutoSwitchCandidate> {
+    auto_switch_candidate_with_policy(
+        accounts,
+        usage_by_account_id,
+        errors_by_account_id,
+        AutoSwitchPolicy::default(),
+    )
+}
+
+pub(crate) fn auto_switch_candidate_with_policy(
+    accounts: &[AccountSummary],
+    usage_by_account_id: &HashMap<String, UsageSnapshot>,
+    errors_by_account_id: &HashMap<String, AccountIssue>,
+    policy: AutoSwitchPolicy,
 ) -> Option<AutoSwitchCandidate> {
     let current = accounts
         .iter()
@@ -113,12 +151,15 @@ pub(crate) fn auto_switch_candidate(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let trigger_remaining = 100.0 - AUTO_SWITCH_THRESHOLD_PERCENT;
+    let trigger_threshold_percent = normalized_percent(policy.auto_switch_threshold_percent);
+    let weekly_penalty_threshold_percent =
+        normalized_percent(policy.weekly_penalty_threshold_percent);
+    let trigger_remaining = 100.0 - trigger_threshold_percent;
     let min_target_remaining = trigger_remaining + 5.0;
 
     for window_key in UsageWindowKey::all() {
         let trigger_threshold = match window_key {
-            UsageWindowKey::Primary => AUTO_SWITCH_THRESHOLD_PERCENT,
+            UsageWindowKey::Primary => trigger_threshold_percent,
             UsageWindowKey::Secondary | UsageWindowKey::Tertiary => 100.0,
         };
         let candidate_threshold = trigger_threshold;
@@ -160,7 +201,7 @@ pub(crate) fn auto_switch_candidate(
             }
 
             let (score, prem, wrem) =
-                compute_switch_score(usage, now_secs, WEEKLY_PENALTY_THRESHOLD);
+                compute_switch_score(usage, now_secs, weekly_penalty_threshold_percent);
 
             match best_target {
                 Some(ref b)
@@ -181,6 +222,8 @@ pub(crate) fn auto_switch_candidate(
             return Some(AutoSwitchCandidate {
                 current_account_id: current.id.clone(),
                 target_account_id: best.account.id.clone(),
+                window_key: window_key.as_str().to_string(),
+                trigger_reset_at: exhausted_window.reset_at,
                 notification: AutoSwitchNotification {
                     current_account_label: current.label.clone(),
                     target_account_label: best.account.label.clone(),
@@ -194,6 +237,16 @@ pub(crate) fn auto_switch_candidate(
     }
 
     None
+}
+
+impl UsageWindowKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Secondary => "secondary",
+            Self::Tertiary => "tertiary",
+        }
+    }
 }
 
 fn candidate_score_is_better(

@@ -12,6 +12,7 @@ fn credential_hiding_redacts_system_notification_text() {
         window_label: "5h limit".to_string(),
         used_percent: 100.0,
         threshold_percent: Some(100.0),
+        reset_at: Some(10),
         title: "Codex quota exhausted".to_string(),
         body: "user@example.com: 5h limit is 100% used.".to_string(),
         generated_at: 1,

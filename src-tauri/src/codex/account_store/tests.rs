@@ -6,12 +6,6 @@ fn temp_root(name: &str) -> PathBuf {
     root
 }
 
-#[cfg(unix)]
-fn assert_symlink_to(path: &Path, target: &Path) {
-    assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
-    assert_eq!(fs::read_link(path).unwrap(), target);
-}
-
 fn path_contains_file_with_contents(path: &Path, contents: &str) -> bool {
     if path.is_file() {
         return fs::read_to_string(path)
@@ -500,7 +494,7 @@ fn email_only_lookup_does_not_match_workspace_record() {
 
 #[test]
 #[cfg(unix)]
-fn managed_home_keeps_auth_local_and_links_shared_state() {
+fn managed_home_is_auth_only_and_does_not_link_shared_state() {
     let root = temp_root("auth-overlay");
     let shared = temp_root("auth-overlay-shared");
     fs::write(shared.join("history.jsonl"), "shared-history").unwrap();
@@ -517,20 +511,11 @@ fn managed_home_keeps_auth_local_and_links_shared_state() {
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_symlink_to(&home.join("history.jsonl"), &shared.join("history.jsonl"));
-    assert_symlink_to(
-        &home.join(".codex-global-state.json"),
-        &shared.join(".codex-global-state.json"),
-    );
-    assert_symlink_to(
-        &home.join("session_index.jsonl"),
-        &shared.join("session_index.jsonl"),
-    );
-    assert_symlink_to(&home.join("sessions"), &shared.join("sessions"));
-    assert_symlink_to(
-        &home.join("archived_sessions"),
-        &shared.join("archived_sessions"),
-    );
+    assert!(!home.join("history.jsonl").exists());
+    assert!(!home.join(".codex-global-state.json").exists());
+    assert!(!home.join("session_index.jsonl").exists());
+    assert!(!home.join("sessions").exists());
+    assert!(!home.join("archived_sessions").exists());
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(shared);
@@ -538,7 +523,7 @@ fn managed_home_keeps_auth_local_and_links_shared_state() {
 
 #[test]
 #[cfg(unix)]
-fn prepare_home_promotes_materialized_state_without_deleting_it() {
+fn prepare_home_backs_up_materialized_state_without_touching_auth() {
     let root = temp_root("promote-state");
     let shared = temp_root("promote-state-shared");
     let store = ManagedCodexAccountStore::new(root.clone()).with_shared_codex_home(shared.clone());
@@ -550,13 +535,18 @@ fn prepare_home_promotes_materialized_state_without_deleting_it() {
 
     store.prepare_home(&home).unwrap();
 
-    assert_eq!(
-        fs::read_to_string(shared.join("history.jsonl")).unwrap(),
+    assert!(!shared.join("history.jsonl").exists());
+    assert!(!shared.join("sessions").exists());
+    assert!(!home.join("history.jsonl").exists());
+    assert!(!home.join("sessions").exists());
+    assert!(path_contains_file_with_contents(
+        &root.join(BACKUPS_DIR_NAME),
         "managed-history"
-    );
-    assert!(shared.join("sessions").join("session.jsonl").exists());
-    assert_symlink_to(&home.join("history.jsonl"), &shared.join("history.jsonl"));
-    assert_symlink_to(&home.join("sessions"), &shared.join("sessions"));
+    ));
+    assert!(path_contains_file_with_contents(
+        &root.join(BACKUPS_DIR_NAME),
+        "{}"
+    ));
     assert!(!fs::symlink_metadata(home.join("auth.json"))
         .unwrap()
         .file_type()
@@ -568,7 +558,7 @@ fn prepare_home_promotes_materialized_state_without_deleting_it() {
 
 #[test]
 #[cfg(unix)]
-fn prepare_home_backs_up_unmergeable_shared_conflicts() {
+fn prepare_home_backs_up_non_auth_files_without_touching_shared_home() {
     let root = temp_root("backup-conflict");
     let shared = temp_root("backup-conflict-shared");
     fs::write(shared.join("history.jsonl"), "shared-history").unwrap();
@@ -583,7 +573,7 @@ fn prepare_home_backs_up_unmergeable_shared_conflicts() {
         fs::read_to_string(shared.join("history.jsonl")).unwrap(),
         "shared-history"
     );
-    assert_symlink_to(&home.join("history.jsonl"), &shared.join("history.jsonl"));
+    assert!(!home.join("history.jsonl").exists());
     assert!(path_contains_file_with_contents(
         &root.join(BACKUPS_DIR_NAME),
         "managed-history"
@@ -644,8 +634,6 @@ fn non_empty_materialized_current_directory_is_moved_to_backups() {
 fn migrates_legacy_app_data_accounts_to_wovo_codex_root() {
     let root = temp_root("migration-new");
     let legacy_root = temp_root("migration-legacy");
-    let shared = temp_root("migration-shared");
-    fs::create_dir_all(shared.join("rules")).unwrap();
     let id = Uuid::new_v4();
     let legacy_home = legacy_root.join("managed-codex-homes").join(id.to_string());
     fs::create_dir_all(&legacy_home).unwrap();
@@ -675,8 +663,7 @@ fn migrates_legacy_app_data_accounts_to_wovo_codex_root() {
     )
     .unwrap();
 
-    let store = ManagedCodexAccountStore::with_legacy_root(root.clone(), legacy_root.clone())
-        .with_shared_codex_home(shared.clone());
+    let store = ManagedCodexAccountStore::with_legacy_root(root.clone(), legacy_root.clone());
     let loaded = store.load_accounts().unwrap();
 
     assert_eq!(loaded.len(), 1);
@@ -686,15 +673,12 @@ fn migrates_legacy_app_data_accounts_to_wovo_codex_root() {
         migrated_home.to_string_lossy().to_string()
     );
     assert!(migrated_home.join("auth.json").exists());
-    #[cfg(unix)]
-    assert_symlink_to(&migrated_home.join("sessions"), &shared.join("sessions"));
-    assert!(shared.join("sessions").join("session.jsonl").exists());
+    assert!(!migrated_home.join("sessions").exists());
+    assert!(!migrated_home.join("rules").exists());
     assert!(legacy_home.join("auth.json").exists());
-    assert!(shared.join("rules").join("legacy.rules").exists());
-    #[cfg(unix)]
-    assert_symlink_to(&migrated_home.join("rules"), &shared.join("rules"));
+    assert!(legacy_home.join("sessions").join("session.jsonl").exists());
+    assert!(legacy_home.join("rules").join("legacy.rules").exists());
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(legacy_root);
-    let _ = fs::remove_dir_all(shared);
 }

@@ -2,7 +2,6 @@ use crate::codex::atomic_file::{replace_file, temporary_file_path, write_new_fil
 use crate::domain::account::AccountSummary;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{Error as IoError, ErrorKind};
@@ -16,9 +15,8 @@ mod identity;
 
 use fs_ops::{
     apply_secure_file_permissions, canonical_or_original, cleanup_error_if_unsafe,
-    copy_account_local_entries, create_symlink, directory_is_empty, is_account_local_entry,
-    move_path, promote_entry_to_shared, remove_path_if_exists, remove_symlink_path,
-    shared_link_points_to,
+    copy_account_local_entries, directory_is_empty, materialize_auth_json, move_path,
+    remove_path_if_exists, remove_symlink_path,
 };
 use identity::{
     authenticated_identity_matches, find_matching_account_index, normalize_optional,
@@ -30,41 +28,7 @@ const STORE_FILE_NAME: &str = "managed-codex-accounts.json";
 const HOMES_DIR_NAME: &str = "accounts";
 const CURRENT_LINK_NAME: &str = "current";
 const CURRENT_ACCOUNT_ID_FILE_NAME: &str = "current-account-id";
-const ACCOUNT_LOCAL_CODEX_ENTRIES: &[&str] = &["auth.json"];
-const KNOWN_SHARED_CODEX_DIRS: &[&str] = &[
-    ".tmp",
-    "sessions",
-    "archived_sessions",
-    "log",
-    "logs",
-    "sqlite",
-    "tmp",
-    "cache",
-    "memories",
-    "plugins",
-    "rules",
-    "shell_snapshots",
-    "skills",
-    "vendor_imports",
-];
-const KNOWN_SHARED_CODEX_FILES: &[&str] = &[
-    ".codex-global-state.json",
-    ".codex-global-state.json.bak",
-    ".personality_migration",
-    "AGENTS.md",
-    "config.toml",
-    "history.jsonl",
-    "installation_id",
-    "logs_2.sqlite",
-    "logs_2.sqlite-shm",
-    "logs_2.sqlite-wal",
-    "models_cache.json",
-    "session_index.jsonl",
-    "state_5.sqlite",
-    "state_5.sqlite-shm",
-    "state_5.sqlite-wal",
-    "version.json",
-];
+const ACCOUNT_AUTH_FILE_NAME: &str = "auth.json";
 const BACKUPS_DIR_NAME: &str = "backups";
 static ACCOUNT_STORE_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -116,7 +80,6 @@ struct ManagedCodexAccountSet {
 pub struct ManagedCodexAccountStore {
     root: PathBuf,
     legacy_root: Option<PathBuf>,
-    shared_codex_home: PathBuf,
 }
 
 impl ManagedCodexAccountStore {
@@ -125,7 +88,6 @@ impl ManagedCodexAccountStore {
         Self {
             root,
             legacy_root: None,
-            shared_codex_home: real_codex_home_path(),
         }
     }
 
@@ -133,13 +95,11 @@ impl ManagedCodexAccountStore {
         Self {
             root,
             legacy_root: Some(legacy_root),
-            shared_codex_home: real_codex_home_path(),
         }
     }
 
     #[cfg(test)]
-    pub fn with_shared_codex_home(mut self, shared_codex_home: PathBuf) -> Self {
-        self.shared_codex_home = shared_codex_home;
+    pub fn with_shared_codex_home(self, _shared_codex_home: PathBuf) -> Self {
         self
     }
 
@@ -562,10 +522,7 @@ impl ManagedCodexAccountStore {
 
     fn prepare_home(&self, home: &Path) -> Result<(), AppError> {
         fs::create_dir_all(home).map_err(|error| AppError::AccountStore(error.to_string()))?;
-        fs::create_dir_all(&self.shared_codex_home)
-            .map_err(|error| AppError::AccountStore(error.to_string()))?;
-        self.promote_managed_state_to_shared(home)?;
-        self.link_shared_codex_entries(home)?;
+        self.migrate_managed_home_to_auth_only(home)?;
         Ok(())
     }
 
@@ -720,7 +677,6 @@ impl ManagedCodexAccountStore {
             if source_home.exists()
                 && canonical_or_original(&source_home)? != canonical_or_original(&target_home)?
             {
-                self.promote_managed_state_to_shared(&source_home)?;
                 copy_account_local_entries(&source_home, &target_home)?;
             }
             self.prepare_home(&target_home)?;
@@ -732,30 +688,7 @@ impl ManagedCodexAccountStore {
         Ok(())
     }
 
-    fn link_shared_codex_entries(&self, home: &Path) -> Result<(), AppError> {
-        for entry in self.shared_codex_entry_names()? {
-            let source = self.shared_codex_home.join(&entry);
-            if is_account_local_entry(&entry) {
-                continue;
-            }
-            let source_exists = source.exists() || fs::symlink_metadata(&source).is_ok();
-            if KNOWN_SHARED_CODEX_DIRS.contains(&entry.as_str()) && !source_exists {
-                fs::create_dir_all(&source)
-                    .map_err(|error| AppError::AccountStore(error.to_string()))?;
-            } else if !source_exists {
-                continue;
-            }
-            let target = home.join(entry);
-            if shared_link_points_to(&target, &source)? {
-                continue;
-            }
-            remove_path_if_exists(&target)?;
-            create_symlink(&source, &target)?;
-        }
-        Ok(())
-    }
-
-    fn promote_managed_state_to_shared(&self, home: &Path) -> Result<(), AppError> {
+    fn migrate_managed_home_to_auth_only(&self, home: &Path) -> Result<(), AppError> {
         if !home.exists() {
             return Ok(());
         }
@@ -768,46 +701,27 @@ impl ManagedCodexAccountStore {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if is_account_local_entry(name) {
+            if name == ACCOUNT_AUTH_FILE_NAME {
+                materialize_auth_json(&entry.path())?;
                 continue;
             }
 
             let source = entry.path();
-            let target = self.shared_codex_home.join(name);
-            if shared_link_points_to(&source, &target)? {
+            let metadata = fs::symlink_metadata(&source)
+                .map_err(|error| AppError::AccountStore(error.to_string()))?;
+            if metadata.file_type().is_symlink() {
+                remove_symlink_path(&source)?;
                 continue;
             }
 
             let backup_root = self.backup_root_for_home(home);
-            promote_entry_to_shared(&source, &target, &backup_root)?;
+            fs::create_dir_all(&backup_root)
+                .map_err(|error| AppError::AccountStore(error.to_string()))?;
+            let backup = backup_root.join(format!("{}-{}", name, Uuid::new_v4()));
+            move_path(&source, &backup)?;
         }
 
         Ok(())
-    }
-
-    fn shared_codex_entry_names(&self) -> Result<Vec<String>, AppError> {
-        let mut entries = BTreeSet::new();
-        for entry in KNOWN_SHARED_CODEX_DIRS {
-            entries.insert((*entry).to_string());
-        }
-        for entry in KNOWN_SHARED_CODEX_FILES {
-            entries.insert((*entry).to_string());
-        }
-
-        match fs::read_dir(&self.shared_codex_home) {
-            Ok(shared_entries) => {
-                for entry in shared_entries {
-                    let entry = entry.map_err(|error| AppError::AccountStore(error.to_string()))?;
-                    if let Some(name) = entry.file_name().to_str() {
-                        entries.insert(name.to_string());
-                    }
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(AppError::AccountStore(error.to_string())),
-        }
-
-        Ok(entries.into_iter().collect())
     }
 
     fn backup_root_for_home(&self, home: &Path) -> PathBuf {
@@ -835,10 +749,6 @@ impl ManagedCodexAccountStore {
 
 pub fn default_wovo_codex_root() -> PathBuf {
     dirs_home().join(".wovo").join("codex")
-}
-
-fn real_codex_home_path() -> PathBuf {
-    dirs_home().join(".codex")
 }
 
 fn dirs_home() -> PathBuf {

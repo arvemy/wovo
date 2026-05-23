@@ -33,6 +33,8 @@ fn usage_for_account(
     UsageSnapshot {
         account_id: account_id.to_string(),
         source: "oauth".to_string(),
+        source_mode: None,
+        fetch_attempts: Vec::new(),
         plan_type: Some("pro".to_string()),
         primary: Some(UsageWindow {
             label: "5h limit".to_string(),

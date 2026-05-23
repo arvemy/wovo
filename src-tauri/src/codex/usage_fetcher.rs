@@ -1,6 +1,7 @@
 use crate::codex::auth_store::CodexOAuthCredentials;
 use crate::domain::usage::{CreditsSnapshot, UsageSnapshot, UsageWindow};
 use crate::error::AppError;
+use crate::provider::ProviderSourceMode;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -374,6 +375,8 @@ fn normalize_oauth_usage(
     Ok(UsageSnapshot {
         account_id,
         source: "oauth".to_string(),
+        source_mode: Some(ProviderSourceMode::Oauth),
+        fetch_attempts: Vec::new(),
         plan_type: response.plan_type,
         primary,
         secondary,
@@ -478,6 +481,8 @@ fn normalize_cli_usage(
     Ok(UsageSnapshot {
         account_id,
         source: "cli".to_string(),
+        source_mode: Some(ProviderSourceMode::Cli),
+        fetch_attempts: Vec::new(),
         plan_type: snapshot.plan_type.or(account_plan_type),
         primary,
         secondary,

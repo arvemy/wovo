@@ -6,10 +6,13 @@ use crate::codex::auth_store::{
     replace_auth_json_from_home, save_credentials, system_codex_home_path, CodexOAuthCredentials,
 };
 use crate::codex::login_runner::{self, LoginRunnerState};
+use crate::codex::runtime;
 use crate::codex::token_refresh;
 use crate::codex::workspace_resolver::WorkspaceResolution;
 use crate::domain::account::AccountSummary;
 use crate::error::AppError;
+use crate::provider::ProviderId;
+use crate::provider_state;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
@@ -121,7 +124,10 @@ pub(crate) fn remove_codex_account_from_store(
             return Err(AppError::LiveAccountRemovalBlocked);
         }
     }
-    store.remove_account(account_id)
+    store.remove_account(account_id)?;
+    runtime::remove_runtime_home(account_id);
+    let _ = provider_state::purge_account_state(ProviderId::Codex, account_id);
+    Ok(())
 }
 
 #[tauri::command]
